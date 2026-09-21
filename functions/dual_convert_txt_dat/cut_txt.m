@@ -1,0 +1,212 @@
+%% CUT RECORDING AT SPECIFIED TIME
+% Truncates recording at a specific time point (removes everything after)
+% Useful for removing disconnections, artifacts, or unwanted sections
+
+clear; clc;
+
+%% CONFIGURATION
+
+% Specify files and their cut times
+% Format: {'filename.txt', cut_time_seconds}
+files_to_cut = {
+    '39920_20250505_100901_HPCright.txt', 7257;      
+    '39920_20250505_100901_HPCleft.txt', 7257;     
+};
+
+% OR: Set to empty and script will ask you for each file
+% files_to_cut = {};
+
+folder_path = '';  % '' = current folder
+
+%% FIND FILES
+
+if isempty(folder_path)
+    folder_path = pwd;
+end
+
+% If no files specified, find all .txt files and ask user
+if isempty(files_to_cut)
+    all_files = dir(fullfile(folder_path, '*.txt'));
+    files = all_files(~contains({all_files.name}, {'_clean.txt', '_segment', '_part', '_cut'}));
+    
+    if isempty(files)
+        error('No .txt files found in: %s', folder_path);
+    end
+    
+    fprintf('INTERACTIVE CUT MODE\n');
+    fprintf('Files found: %d\n\n', length(files));
+    
+    for i = 1:length(files)
+        fprintf('%2d. %s\n', i, files(i).name);
+    end
+    
+    fprintf('\nFor each file, enter cut time in SECONDS (or 0 to skip)\n\n');
+    
+    files_to_cut = {};
+    for i = 1:length(files)
+        cut_time = input(sprintf('Cut time for %s (seconds): ', files(i).name));
+        if cut_time > 0
+            files_to_cut{end+1, 1} = files(i).name;
+            files_to_cut{end, 2} = cut_time;
+        end
+    end
+    
+    if isempty(files_to_cut)
+        fprintf('No files selected for cutting. Exiting.\n');
+        return;
+    end
+end
+
+%% CREATE OUTPUT FOLDER
+cut_folder = fullfile(folder_path, 'cut_recordings');
+if ~exist(cut_folder, 'dir')
+    mkdir(cut_folder);
+end
+
+fprintf('\nRECORDING CUTTER\n');
+fprintf('Files to process: %d\n', size(files_to_cut, 1));
+fprintf('Output folder: cut_recordings/\n\n');
+
+%% PROCESS EACH FILE
+
+for file_idx = 1:size(files_to_cut, 1)
+    
+    filename = files_to_cut{file_idx, 1};
+    cut_time_seconds = files_to_cut{file_idx, 2};
+    cut_time_minutes = cut_time_seconds / 60;
+    cut_time_hours = cut_time_seconds / 3600;
+    
+    file_path = fullfile(folder_path, filename);
+    [~, fname, ~] = fileparts(filename);
+    
+    fprintf('Processing: %s\n', filename);
+    fprintf('  Cut time: %.2f seconds (%.2f min, %.2f hours)\n', ...
+        cut_time_seconds, cut_time_minutes, cut_time_hours);
+    
+    if ~exist(file_path, 'file')
+        fprintf('  ✗ ERROR: File not found!\n\n');
+        continue;
+    end
+    
+    try
+        % Load data
+        data = load_LFP_intan_txt(file_path);
+        fs = data.fs;
+        signal_uV = data.signal;
+        t = data.time_seconds;
+        
+        original_duration_sec = max(t);
+        original_duration_min = original_duration_sec / 60;
+        original_duration_hours = original_duration_sec / 3600;
+        original_n_samples = length(signal_uV);
+        
+        fprintf('  Original duration: %.2f seconds (%.2f min, %.2f hours)\n', ...
+            original_duration_sec, original_duration_min, original_duration_hours);
+        fprintf('  Original samples: %d\n', original_n_samples);
+        
+        % Check if cut time is valid
+        if cut_time_seconds >= max(t)
+            fprintf('  ⚠ WARNING: Cut time (%.2f sec) >= recording duration (%.2f sec)\n', ...
+                cut_time_seconds, original_duration_sec);
+            fprintf('  Skipping this file (no cut needed)\n\n');
+            continue;
+        end
+        
+        if cut_time_seconds <= 0
+            fprintf('  ✗ ERROR: Cut time must be > 0\n\n');
+            continue;
+        end
+        
+        % Find cut sample index
+        cut_sample_idx = find(t <= cut_time_seconds, 1, 'last');
+        
+        if isempty(cut_sample_idx)
+            fprintf('  ✗ ERROR: Could not find cut point\n\n');
+            continue;
+        end
+        
+        % Extract signal up to cut point
+        cut_signal = signal_uV(1:cut_sample_idx);
+        cut_time_vec = t(1:cut_sample_idx);
+        
+        actual_cut_time_seconds = cut_time_vec(end);
+        actual_cut_time_minutes = actual_cut_time_seconds / 60;
+        actual_cut_time_hours = actual_cut_time_seconds / 3600;
+        
+        cut_n_samples = length(cut_signal);
+        removed_samples = original_n_samples - cut_n_samples;
+        removed_duration_sec = removed_samples / fs;
+        removed_duration_min = removed_duration_sec / 60;
+        
+        fprintf('  Actual cut at: %.2f seconds (sample %d)\n', ...
+            actual_cut_time_seconds, cut_sample_idx);
+        fprintf('  New duration: %.2f seconds (%.2f min, %.2f hours)\n', ...
+            actual_cut_time_seconds, actual_cut_time_minutes, actual_cut_time_hours);
+        fprintf('  New samples: %d\n', cut_n_samples);
+        fprintf('  Removed: %d samples (%.2f seconds, %.2f min)\n', ...
+            removed_samples, removed_duration_sec, removed_duration_min);
+        
+        % Calculate signal ranges
+        original_signal_range = [min(signal_uV), max(signal_uV)];
+        cut_signal_range = [min(cut_signal), max(cut_signal)];
+        
+        % Create output filename
+        output_filename = sprintf('%s_cut', fname);
+        output_path = fullfile(cut_folder, output_filename);
+        
+        % Write file with metadata
+        fid = fopen(output_path, 'w');
+        
+        % ===== ORIGINAL METADATA =====
+        fprintf(fid, '# mouse_id = %s\n', data.mouse_id);
+        fprintf(fid, '# fs = %.10f\n', fs);
+        fprintf(fid, '# time_unit = seconds\n');
+        
+        if isfield(data, 'port')
+            fprintf(fid, '# port = %s\n', data.port);
+        end
+        
+        fprintf(fid, '# region = %s\n', data.region);
+        
+        if isfield(data, 'native_name')
+            fprintf(fid, '# native_name = %s\n', data.native_name);
+        end
+        
+        fprintf(fid, '# session_time = %s\n', data.session_time);
+        fprintf(fid, '# signal_range = [%.2f, %.2f] microvolts\n', ...
+            cut_signal_range(1), cut_signal_range(2));
+        
+        % ===== CUT METADATA =====
+        fprintf(fid, '# Original_file = %s\n', filename);
+        fprintf(fid, '# Cut_at = %.2f seconds (%.2f minutes, %.2f hours)\n', ...
+            actual_cut_time_seconds, actual_cut_time_minutes, actual_cut_time_hours);
+        fprintf(fid, '# Cut_sample_index = %d\n', cut_sample_idx);
+        fprintf(fid, '# Original_duration = %.2f seconds (%.2f minutes, %.2f hours)\n', ...
+            original_duration_sec, original_duration_min, original_duration_hours);
+        fprintf(fid, '# New_duration = %.2f seconds (%.2f minutes, %.2f hours)\n', ...
+            actual_cut_time_seconds, actual_cut_time_minutes, actual_cut_time_hours);
+        fprintf(fid, '# Original_samples = %d\n', original_n_samples);
+        fprintf(fid, '# samples = %d\n', cut_n_samples);
+        fprintf(fid, '# Removed_samples = %d (%.2f seconds, %.2f minutes)\n', ...
+            removed_samples, removed_duration_sec, removed_duration_min);
+        fprintf(fid, '# Original_signal_range = [%.2f, %.2f] microvolts\n', ...
+            original_signal_range(1), original_signal_range(2));
+        
+        % Data column description
+        fprintf(fid, '# columns = amplitude_microvolts\n');
+        
+        % Write signal data
+        fprintf(fid, '%.6f\n', cut_signal);
+        
+        fclose(fid);
+        
+        fprintf('  ✓ Saved: %s\n\n', output_filename);
+        
+    catch ME
+        fprintf('  ✗ ERROR: %s\n\n', ME.message);
+        continue;
+    end
+end
+
+fprintf('CUTTING COMPLETE\n');
+fprintf('Cut recordings saved in: %s\n', cut_folder);
