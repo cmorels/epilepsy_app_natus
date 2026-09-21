@@ -1,0 +1,22 @@
+# Raw/test EDF data -- too large for git (GitHub rejects files > 100 MB).
+# Keep locally; share separately (e.g. Git LFS, external storage) if versioning is needed.
+097-s/
+*.edf
+*.EDF
+
+# Pipeline outputs (regenerable from src/ + the EDF inputs)
+pipeline_output/
+**/01_txt/
+**/02_clean/
+**/03_seizures/
+**/04_iid/
+**/05_summaries/
+**/logs/
+*_clean.txt
+*.mat
+*.fig
+*.png
+*.xlsx
+
+# MATLAB autosave
+*.asv
