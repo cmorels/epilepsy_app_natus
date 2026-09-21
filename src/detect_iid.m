@@ -348,6 +348,8 @@ function T = add_abs_columns(T, start_col, end_col, session_start)
     if n == 0 || isnat(session_start)
         T.start_abs = NaT(n, 1);
         T.end_abs = NaT(n, 1);
+        T.start_abs.TimeZone = session_start.TimeZone;  % keep zoned/unzoned consistent with session_start for vertcat downstream
+        T.end_abs.TimeZone = session_start.TimeZone;
     else
         T.start_abs = rel_to_abs_time(T.(start_col), session_start);
         T.end_abs = rel_to_abs_time(T.(end_col), session_start);

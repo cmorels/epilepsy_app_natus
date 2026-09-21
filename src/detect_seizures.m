@@ -138,6 +138,8 @@ function seizure_results = detect_seizures(data, cfg)
         seizures = table('Size', [0 7], ...
             'VariableTypes', {'double', 'double', 'double', 'double', 'datetime', 'datetime', 'double'}, ...
             'VariableNames', {'id', 'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', 'block_id'});
+        seizures.start_abs.TimeZone = session_start.TimeZone;
+        seizures.end_abs.TimeZone = session_start.TimeZone;
     else
         seizures = cell2table(seizure_rows, ...
             'VariableNames', {'id', 'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', 'block_id'});
@@ -197,6 +199,7 @@ end
 function abs_t = abs_time_or_nat(t_rel_s, session_start)
     if isnat(session_start)
         abs_t = NaT;
+        abs_t.TimeZone = session_start.TimeZone;  % keep zoned/unzoned consistent with session_start for vertcat downstream
     else
         abs_t = rel_to_abs_time(t_rel_s, session_start);
     end
