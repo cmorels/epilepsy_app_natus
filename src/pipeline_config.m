@@ -42,6 +42,7 @@ cfg.clean.fixed_lower_uV = -2500;
 cfg.clean.fixed_upper_uV = 2500;
 cfg.clean.k_factor = 10;
 cfg.clean.auto_switch_pct = 0.1;   % if use_fixed_thresholds=false and prelim. outliers > this %, switch to fixed
+cfg.clean.output_dir = '';         % '' -> caller decides (defaults to pwd when clean_lfp is run standalone)
 
 %% ---- Stage 4: seizure detection (src/detect_seizures.m) ---------------
 % Ported from complete_pipeline_seizures.m (STEP 3).
@@ -53,6 +54,7 @@ cfg.seizure.window_sec = 2;
 cfg.seizure.median_factor = 10;
 cfg.seizure.min_seizure_duration = 15;
 cfg.seizure.zoom_margin_s = 5;      % per-seizure zoom figure margin
+cfg.seizure.output_dir = '';        % '' -> caller decides (defaults to pwd when detect_seizures is run standalone)
 
 %% ---- Stage 5: IID detection (src/detect_iid.m) -------------------------
 % Ported from IID_detection_FINAL.m.
@@ -75,6 +77,7 @@ cfg.iid.burst_min_duration_s = 4;       % burst kept if duration_s > this
 cfg.iid.burst_max_duration_s = 40;      % burst kept if duration_s < this
 cfg.iid.exclusion_buffer_s = 5;         % buffer added around each exclusion zone
 cfg.iid.exclusion_zones_manual = zeros(0, 2); % extra [start end] zones, unioned with seizures+gaps
+cfg.iid.output_dir = '';                % '' -> caller decides (defaults to pwd when detect_iid is run standalone)
 
 %% ---- Stage 6: batch orchestration (src/run_pipeline_edf.m) ------------
 cfg.paths.output_root = fullfile(pwd, 'pipeline_output');
