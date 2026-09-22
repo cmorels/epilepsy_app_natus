@@ -20,3 +20,6 @@ pipeline_output/
 
 # MATLAB autosave
 *.asv
+
+# Local Claude Code tooling state, not part of the project
+.claude/

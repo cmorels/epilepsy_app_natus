@@ -25,6 +25,11 @@ function result = run_pipeline_edf(input_folder, cfg)
 % trivial, low-drift-risk one-line rule. 01_txt/03_seizures/04_iid still
 % run every time; they internally refuse to overwrite an existing file,
 % but do not skip the underlying computation.
+%
+% To combine several separate runs (e.g. one per subject) into one set of
+% summaries, see merge_pipeline_runs.m -- this function only consolidates
+% files processed within THIS call; a second call with the same
+% cfg.paths.output_root overwrites 05_summaries/, it does not append.
 
     if nargin < 2 || isempty(cfg)
         cfg = pipeline_config();
@@ -450,157 +455,4 @@ function T = build_qc_row(subject_id, region, source_file, session_start, stages
         numel(warnings_list), {strjoin(warnings_list, '; ')}, ...
         'VariableNames', {'subject_id', 'region', 'source_file', 'session_start', 'stages_completed', ...
         'n_errors', 'error_messages', 'n_blocks_rejected_short', 'outlier_pct', 'nan_pct', 'n_warnings', 'warning_messages'});
-end
-
-%% ======================================================================
-function T = vertcat_or_empty(parts, empty_fn)
-    if isempty(parts)
-        T = empty_fn();
-    else
-        T = vertcat(parts{:});
-    end
-end
-
-function T = apply_tz(T, tz)
-% All-NaT datetime columns default to an unzoned TimeZone (''), which
-% MATLAB refuses to vertcat against a zoned datetime column. Stamping tz
-% here keeps every empty-fallback table concatenation-compatible with the
-% real (zoned) data it may later be vertcat-ed against.
-    for name = T.Properties.VariableNames
-        if isdatetime(T.(name{1}))
-            T.(name{1}).TimeZone = tz;
-        end
-    end
-end
-
-function T = empty_seizure_events_table(tz)
-    T = table('Size', [0 12], ...
-        'VariableTypes', {'cell', 'cell', 'datetime', 'cell', 'double', 'double', 'double', 'double', 'datetime', 'datetime', 'double', 'logical'}, ...
-        'VariableNames', {'subject_id', 'region', 'session_start', 'source_file', 'seizure_id', 'start_s', 'end_s', ...
-        'duration_s', 'start_abs', 'end_abs', 'block_id', 'adjacent_to_gap'});
-    T = apply_tz(T, tz);
-end
-
-function T = empty_seizure_summary_table(tz)
-    names = {'subject_id', 'region', 'session_start', 'source_file', 'total_duration_min', 'valid_duration_min', ...
-        'n_gaps', 'gap_duration_min', 'n_seizures', 'total_seizure_time_s', 'pct_time_in_seizure', ...
-        'mean_duration_s', 'min_duration_s', 'max_duration_s', 'median_energy', 'threshold_value', 'pct_above_thr', ...
-        'n_segments', 'n_rejected', 'bandpass_low', 'bandpass_high', 'power_exponent', 'window_s', 'median_factor', 'min_seizure_duration'};
-    types = [{'cell', 'cell', 'datetime', 'cell'}, repmat({'double'}, 1, numel(names) - 4)];
-    T = table('Size', [0 numel(names)], 'VariableTypes', types, 'VariableNames', names);
-    T = apply_tz(T, tz);
-end
-
-function T = empty_iid_events_table(tz)
-    T = table('Size', [0 16], ...
-        'VariableTypes', {'cell', 'cell', 'datetime', 'cell', 'double', 'double', 'double', 'datetime', 'datetime', ...
-        'double', 'double', 'cell', 'double', 'double', 'logical', 'double'}, ...
-        'VariableNames', {'subject_id', 'region', 'session_start', 'source_file', 'complex_id', 'start_s', 'end_s', ...
-        'start_abs', 'end_abs', 'duration_ms', 'n_spikes', 'classification', 'max_amplitude_mV', 'mean_amplitude_mV', ...
-        'in_burst', 'burst_id'});
-    T = apply_tz(T, tz);
-end
-
-function T = empty_iid_summary_table(tz)
-    names = {'subject_id', 'region', 'session_start', 'source_file', 'total_duration_min', 'analyzed_duration_min', ...
-        'excluded_duration_min', 'n_exclusion_zones', 'baseline_uV', 'lower_threshold_uV', 'upper_threshold_uV', ...
-        'total_peaks', 'total_complexes', 'n_single', 'n_polyspike', 'pct_polyspike', 'complexes_per_min', 'single_per_min', ...
-        'polyspikes_per_min', 'n_bursts', 'bursts_per_hour', 'mean_spikes_per_polyspike'};
-    types = [{'cell', 'cell', 'datetime', 'cell'}, repmat({'double'}, 1, numel(names) - 4)];
-    T = table('Size', [0 numel(names)], 'VariableTypes', types, 'VariableNames', names);
-    T = apply_tz(T, tz);
-end
-
-function T = empty_iid_bursts_table(tz)
-    T = table('Size', [0 8], ...
-        'VariableTypes', {'cell', 'cell', 'double', 'double', 'datetime', 'datetime', 'double', 'double'}, ...
-        'VariableNames', {'subject_id', 'region', 'start_s', 'end_s', 'start_abs', 'end_abs', 'duration_s', 'n_complexes'});
-    T = apply_tz(T, tz);
-end
-
-function T = empty_gaps_table(tz)
-    T = table('Size', [0 9], ...
-        'VariableTypes', {'double', 'double', 'double', 'double', 'datetime', 'datetime', 'double', 'double', 'cell'}, ...
-        'VariableNames', {'gap_id', 'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', 'prev_record_idx', 'next_record_idx', 'source_file'});
-    T = apply_tz(T, tz);
-end
-
-function T = empty_qc_table(tz)
-    T = table('Size', [0 12], ...
-        'VariableTypes', {'cell', 'cell', 'cell', 'datetime', 'cell', 'double', 'cell', 'double', 'double', 'double', 'double', 'cell'}, ...
-        'VariableNames', {'subject_id', 'region', 'source_file', 'session_start', 'stages_completed', ...
-        'n_errors', 'error_messages', 'n_blocks_rejected_short', 'outlier_pct', 'nan_pct', 'n_warnings', 'warning_messages'});
-    T = apply_tz(T, tz);
-end
-
-%% ======================================================================
-function T = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz)
-    rows_abs = [seizures_events.start_abs; iid_bursts.start_abs; gaps_summary.start_abs];
-    rows_dur = [seizures_events.duration_s; iid_bursts.duration_s; gaps_summary.duration_s];
-    rows_type = [repmat({'seizure'}, height(seizures_events), 1); ...
-                 repmat({'iid_burst'}, height(iid_bursts), 1); ...
-                 repmat({'gap'}, height(gaps_summary), 1)];
-    rows_region = [seizures_events.region; iid_bursts.region; repmat({''}, height(gaps_summary), 1)];
-    gap_subjects = cellfun(@(s) lookup_subject(s, file_subject_map), gaps_summary.source_file, 'UniformOutput', false);
-    rows_subject = [seizures_events.subject_id; iid_bursts.subject_id; gap_subjects];
-
-    n = numel(rows_abs);
-    if n == 0
-        T = table('Size', [0 7], ...
-            'VariableTypes', {'datetime', 'cell', 'cell', 'double', 'cell', 'cell', 'cell'}, ...
-            'VariableNames', {'abs_time', 'clock_time', 'event_type', 'duration_s', 'region', 'subject_id', 'natus_confirmed'});
-        T.abs_time.TimeZone = tz;
-        return;
-    end
-
-    [abs_sorted, order] = sort(rows_abs);
-    clock_time = cellstr(string(abs_sorted, 'HH:mm:ss'));
-
-    T = table(abs_sorted, clock_time, rows_type(order), rows_dur(order), rows_region(order), rows_subject(order), ...
-        repmat({''}, n, 1), ...
-        'VariableNames', {'abs_time', 'clock_time', 'event_type', 'duration_s', 'region', 'subject_id', 'natus_confirmed'});
-end
-
-function subj = lookup_subject(source_file, file_subject_map)
-    if isKey(file_subject_map, source_file)
-        subj = file_subject_map(source_file);
-    else
-        subj = '';
-    end
-end
-
-%% ======================================================================
-function paths = write_all_summaries(summaries_dir, seizures_events, seizures_summary, ...
-        iid_events, iid_summary, iid_bursts, gaps_summary, qc_report, natus_review_sheet)
-
-    paths = struct();
-    paths.seizures_events = fullfile(summaries_dir, 'seizures_events.csv');
-    paths.seizures_summary = fullfile(summaries_dir, 'seizures_summary.csv');
-    paths.iid_events = fullfile(summaries_dir, 'iid_events.csv');
-    paths.iid_summary = fullfile(summaries_dir, 'iid_summary.csv');
-    paths.iid_bursts = fullfile(summaries_dir, 'iid_bursts.csv');
-    paths.gaps_summary = fullfile(summaries_dir, 'gaps_summary.csv');
-    paths.qc_report = fullfile(summaries_dir, 'qc_report.csv');
-    paths.natus_review_sheet = fullfile(summaries_dir, 'natus_review_sheet.csv');
-    paths.pipeline_summary_xlsx = fullfile(summaries_dir, 'pipeline_summary.xlsx');
-
-    writetable(seizures_events, paths.seizures_events);
-    writetable(seizures_summary, paths.seizures_summary);
-    writetable(iid_events, paths.iid_events);
-    writetable(iid_summary, paths.iid_summary);
-    writetable(iid_bursts, paths.iid_bursts);
-    writetable(gaps_summary, paths.gaps_summary);
-    writetable(qc_report, paths.qc_report);
-    writetable(natus_review_sheet, paths.natus_review_sheet);
-
-    if exist(paths.pipeline_summary_xlsx, 'file') == 2
-        delete(paths.pipeline_summary_xlsx);
-    end
-    writetable(seizures_events, paths.pipeline_summary_xlsx, 'Sheet', 'seizures_events');
-    writetable(seizures_summary, paths.pipeline_summary_xlsx, 'Sheet', 'seizures_summary');
-    writetable(iid_events, paths.pipeline_summary_xlsx, 'Sheet', 'iid_events');
-    writetable(iid_summary, paths.pipeline_summary_xlsx, 'Sheet', 'iid_summary');
-    writetable(iid_bursts, paths.pipeline_summary_xlsx, 'Sheet', 'iid_bursts');
-    writetable(gaps_summary, paths.pipeline_summary_xlsx, 'Sheet', 'gaps');
-    writetable(qc_report, paths.pipeline_summary_xlsx, 'Sheet', 'qc');
 end
