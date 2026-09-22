@@ -99,6 +99,12 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
     nrec = info.NumDataRecords;
 
     [hdr, ~] = edfread(edf_path, 'TimeOutputType', 'duration', 'SelectedSignals', labels);
+    % edfread sanitizes signal labels into table variable names (e.g. "EEG A5C2"
+    % -> "EEGA5C2", spaces stripped), so hdr.(label) with the ORIGINAL label can
+    % fail even though that label matched info.SignalLabels correctly. SelectedSignals
+    % preserves request order, so hdr_var_names{i} is always the right column for
+    % labels{i} regardless of how edfread renamed it.
+    hdr_var_names = hdr.Properties.VariableNames;
     record_times = hdr.("Record Time");
     rt0 = record_times(1);
     rt = seconds(record_times - rt0);
@@ -147,7 +153,7 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
                 label, unit_raw);
         end
 
-        [sig, n_samples, n_valid] = place_samples(hdr.(label), spr, fs_ch, nrec, is_real_gap, gap_duration_s, scale);
+        [sig, n_samples, n_valid] = place_samples(hdr.(hdr_var_names{i}), spr, fs_ch, nrec, is_real_gap, gap_duration_s, scale);
         total_duration_s = n_samples / fs_ch;
         valid_duration_s = n_valid / fs_ch;
         n_gaps = height(gaps_table);
