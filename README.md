@@ -188,6 +188,56 @@ every seizure, IID burst, and gap merged and sorted by absolute time
 `abs_time, clock_time, event_type ('seizure'|'iid_burst'|'gap'), duration_s, region, subject_id, natus_confirmed`
 (`natus_confirmed` is left blank for the reviewer to fill in by hand).
 
+### Re-reading these CSVs safely
+
+Plain `readtable()` is **not** safe on any file above: MATLAB's automatic
+column-type detection turns a `subject_id` like `"097"` into the number
+`97`, and a file with zero rows (e.g. zero gaps) comes back with its
+datetime columns typed as a plain `struct` instead of `datetime`, because
+there is nothing in the file for `readtable` to infer a format from. Use
+`read_pipeline_csv.m` instead, which forces every column to the type the
+pipeline actually writes:
+
+```matlab
+se = read_pipeline_csv('pipeline_output/05_summaries/seizures_events.csv', 'seizures_events');
+```
+
+`kind` (the 2nd argument) is one of `seizures_events`, `seizures_summary`,
+`iid_events`, `iid_summary`, `iid_bursts`, `gaps`, `qc` -- matching the
+CSV you're reading. A 3rd argument sets the TimeZone to reconstruct on
+`start_abs`/`end_abs`/`session_start` (default `Europe/Paris`, must match
+whatever `cfg.general.timezone` the run actually used -- plain CSV text
+carries no timezone of its own).
+
+## Multiple subjects / multiple recording days
+
+`run_pipeline_edf.m` uses a single `cfg.edf.subject_id` for every EDF it
+processes in one call. If a folder mixes EDFs from different mice, either
+name the EDF files so `cfg.edf.subject_id = ''` can derive a correct,
+distinct ID per file from each filename, or -- the more reliable option --
+run `run_pipeline_edf` once per subject (its own input folder, its own
+`cfg.edf.subject_id`, its own `cfg.paths.output_root`) and combine the
+results afterward with `merge_pipeline_runs.m`:
+
+```matlab
+r1 = run_pipeline_edf('data/mouse_097', set_subject(pipeline_config(), '097', 'out/097'));
+r2 = run_pipeline_edf('data/mouse_098', set_subject(pipeline_config(), '098', 'out/098'));
+
+merged = merge_pipeline_runs({'out/097', 'out/098'}, 'out/merged');
+merged.seizures_events           % both subjects, correctly identified
+merged.paths.natus_review_sheet  % one combined review sheet, chronological
+
+function cfg = set_subject(cfg, id, out_dir)
+    cfg.edf.subject_id = id;
+    cfg.paths.output_root = out_dir;
+end
+```
+
+Recordings of the *same* mouse on different days need no special
+handling: `session_start` (from the EDF's own header) and the output
+filenames already differentiate sessions, so they can all go through one
+`run_pipeline_edf` call with one fixed `subject_id`.
+
 ## Invocation
 
 ```matlab
@@ -239,11 +289,17 @@ src/
   detect_seizures.m            seizure detection
   detect_iid.m                  interictal spike/polyspike/burst detection
   run_pipeline_edf.m           batch orchestrator over a folder of EDFs
+  merge_pipeline_runs.m         combine several run_pipeline_edf.m runs (e.g. multiple subjects)
   utils/
     write_lfp_txt.m, parse_header.m      generic txt header read/write
     mask_to_segments.m, filter_by_blocks.m   gap-respecting block utilities
     rel_to_abs_time.m                     relative seconds -> absolute datetime
     ensure_findpeaks_signal_toolbox.m     forces Signal Toolbox findpeaks over Chronux
+    read_pipeline_csv.m                   safe reader for the 05_summaries/ CSVs
+    write_all_summaries.m, build_natus_review_sheet.m   shared writer, used by both
+      run_pipeline_edf.m and merge_pipeline_runs.m
+    apply_tz.m, vertcat_or_empty.m, empty_*_table.m     table-schema plumbing shared by
+      the writer and read_pipeline_csv.m (single source of truth, see their headers)
 KNOWN_ISSUES.md               methodological caveats carried over unchanged, on purpose
 ```
 
