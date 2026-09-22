@@ -183,11 +183,17 @@ function seizure_results = detect_seizures(data, cfg)
             save(mat_file, 'seizure_results');
         end
 
-        [fig_file, png_file] = save_panorama_figure(out_dir, base, cfg, data.meta, ...
-            t_rel, signal, bp_full_plot, energy_full_plot, threshold, seizures, gap_blocks_t, n_seizures);
+        try
+            [fig_file, png_file] = save_panorama_figure(out_dir, base, cfg, data.meta, ...
+                t_rel, signal, bp_full_plot, energy_full_plot, threshold, seizures, gap_blocks_t, n_seizures);
 
-        save_zoom_figures(out_dir, base, cfg, t_rel, signal, bp_full_plot, energy_full_plot, ...
-            threshold, seizures, gap_blocks_t);
+            save_zoom_figures(out_dir, base, cfg, t_rel, signal, bp_full_plot, energy_full_plot, ...
+                threshold, seizures, gap_blocks_t);
+        catch ME
+            warning('detect_seizures:FigureSaveFailed', ...
+                'Could not generate/save seizure figures for %s: %s. Seizure detection results are unaffected.', ...
+                data.file, ME.message);
+        end
     end
 
     seizure_results.mat_file = mat_file;
@@ -229,29 +235,42 @@ end
 
 function [fig_file, png_file] = save_panorama_figure(out_dir, base, cfg, meta, ...
         t_rel, signal, bp_full_plot, energy_full_plot, threshold, seizures, gap_blocks_t, n_seizures)
+% Panorama plots cover the whole recording, which for a long EDF (tens of
+% millions of samples, or hundreds of millions for a multi-hour/overnight
+% recording) makes a single-line plot of every sample slow, memory-heavy,
+% and prone to a corrupt/failed .fig save. Lines are min-max decimated for
+% display only -- the returned seizures table and everything it's built
+% from is exact; only this figure's resolution is reduced.
+    target_points = 20000;
 
     fig = figure('Position', [50, 50, 1400, 900], 'Visible', 'off');
 
+    [t1, y1] = decimate_minmax(t_rel, signal, target_points);
     subplot(3, 1, 1);
     shade_gaps(gap_blocks_t); hold on;
-    plot(t_rel, signal, 'Color', [0.3 0.3 0.3], 'LineWidth', 0.5);
+    plot(t1, y1, 'Color', [0.3 0.3 0.3], 'LineWidth', 0.5);
     shade_seizures(seizures);
     title(sprintf('%s - Cleaned LFP (%d seizures)', region_label(meta, base), n_seizures), 'Interpreter', 'none');
     xlabel('Time (s)'); ylabel('uV'); grid on; hold off;
 
+    [t2, y2] = decimate_minmax(t_rel, bp_full_plot, target_points);
     subplot(3, 1, 2);
     shade_gaps(gap_blocks_t); hold on;
-    plot(t_rel, bp_full_plot, 'Color', [0.2 0.4 0.7], 'LineWidth', 0.5);
+    plot(t2, y2, 'Color', [0.2 0.4 0.7], 'LineWidth', 0.5);
     shade_seizures(seizures);
     title(sprintf('Band-passed [%g-%g Hz]', cfg.seizure.bandpass_band(1), cfg.seizure.bandpass_band(2)));
     xlabel('Time (s)'); ylabel('Normalized'); grid on; hold off;
 
+    [t3, y3] = decimate_minmax(t_rel, energy_full_plot, target_points);
     subplot(3, 1, 3);
     shade_gaps(gap_blocks_t); hold on;
-    plot(t_rel, energy_full_plot, 'Color', [0.2 0.6 0.3], 'LineWidth', 0.5);
+    plot(t3, y3, 'Color', [0.2 0.6 0.3], 'LineWidth', 0.5);
     yline(threshold, 'r--', sprintf('Threshold (median x %.1f)', cfg.seizure.median_factor), 'LineWidth', 2);
-    above_mask = energy_full_plot > threshold;
-    plot(t_rel(above_mask), energy_full_plot(above_mask), 'r.', 'MarkerSize', 3);
+    above_idx = find(energy_full_plot > threshold);
+    if numel(above_idx) > target_points
+        above_idx = above_idx(round(linspace(1, numel(above_idx), target_points)));
+    end
+    plot(t_rel(above_idx), energy_full_plot(above_idx), 'r.', 'MarkerSize', 3);
     shade_seizures(seizures);
     title('Energy Metric'); xlabel('Time (s)'); ylabel('Energy (a.u.)'); grid on; hold off;
 

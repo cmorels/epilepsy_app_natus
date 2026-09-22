@@ -156,10 +156,16 @@ function iid_results = detect_iid(data, seizures, cfg)
             save(mat_file, 'iid_results');
         end
 
-        [fig_file, png_file] = save_panorama_figure(out_dir, base, data.meta, t_rel, x_bp_full, ...
-            lower_mV, exclusion_table, Single_Spike_Table, Polyspike_Table, Burst_Table, pos_s, spike_complex_ids, Spike_Complex_Table);
+        try
+            [fig_file, png_file] = save_panorama_figure(out_dir, base, data.meta, t_rel, x_bp_full, ...
+                lower_mV, exclusion_table, Single_Spike_Table, Polyspike_Table, Burst_Table, pos_s, spike_complex_ids, Spike_Complex_Table);
 
-        save_polyspike_examples(out_dir, base, t_rel, x_bp_full, lower_mV, Polyspike_Table, pos_s, spike_complex_ids);
+            save_polyspike_examples(out_dir, base, t_rel, x_bp_full, lower_mV, Polyspike_Table, pos_s, spike_complex_ids);
+        catch ME
+            warning('detect_iid:FigureSaveFailed', ...
+                'Could not generate/save IID figures for %s: %s. IID detection results are unaffected.', ...
+                data.file, ME.message);
+        end
     end
 
     iid_results.mat_file = mat_file;
@@ -404,9 +410,16 @@ end
 function [fig_file, png_file] = save_panorama_figure(out_dir, base, meta, t_rel, x_bp_full, lower_mV, ...
         exclusion_table, Single_Spike_Table, Polyspike_Table, Burst_Table, pos_s, spike_complex_ids, Spike_Complex_Table)
 
+    % Min-max decimated for display only (see decimate_minmax.m) -- a long
+    % recording's full-resolution line is what previously made this figure
+    % too large to save; spike markers below are plotted individually and
+    % unaffected, since there are orders of magnitude fewer of those than
+    % raw samples.
+    [t_plot, y_plot] = decimate_minmax(t_rel, x_bp_full, 20000);
+
     fig = figure('Name', 'IID Detection with Exclusion Zones', 'Position', [100 100 1400 600], 'Visible', 'off');
     shade_zones(exclusion_table); hold on;
-    plot(t_rel, x_bp_full, 'k', 'DisplayName', 'Signal');
+    plot(t_plot, y_plot, 'k', 'DisplayName', 'Signal');
 
     single_ids = Spike_Complex_Table.Complex_ID(~Spike_Complex_Table.Is_polyspike);
     poly_ids = Spike_Complex_Table.Complex_ID(Spike_Complex_Table.Is_polyspike);
