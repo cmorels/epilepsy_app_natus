@@ -17,11 +17,15 @@ cfg.general.overwrite = false;                             % shared "skip stage 
 
 %% ---- Stage 1: EDF import (src/edf_import.m) ---------------------------
 % Channel selection. mode = 'list' (region name = EDF label, no renaming),
-% 'map' (containers.Map from EDF label -> region name), or 'all' (every
-% signal in the file, region name = EDF label).
+% 'map' (containers.Map from EDF label -> region name), 'all' (every
+% signal in the file, region name = EDF label), or 'log' (per-file
+% mapping from a recording log, see utils/load_recording_log.m, matched
+% on (cfg.edf.subject_id, EDF filename)).
 cfg.edf.channels.mode = 'list';
 cfg.edf.channels.labels = {'A7C1', 'A7C3'};   % labels found in 097-s test EDF; edit per study
 cfg.edf.channels.map = containers.Map({'EEG1', 'EEG2'}, {'HPCleft', 'HPCright'}); % TEMPLATE for mode='map' -- edit to real labels/regions before using
+cfg.edf.channels.log_file = '';                  % mode='log': path to EEG_recording_log.xlsx
+cfg.edf.channels.log_regions = {'HPCr', 'HPCl'}; % mode='log': region names for the HPCr_channel / HPCl_channel columns
 
 cfg.edf.gap_tol_s = 1e-3;   % |actual_dt - DataRecordDuration| beyond this is a gap candidate (matches edf_txt_conversion_Samara.m tol)
 cfg.edf.gap_min_s = 0.5;    % candidates shorter than this are logged as jitter, not a real gap

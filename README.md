@@ -88,6 +88,17 @@ single file or channel failing (logged, not fatal -- see `qc_report.csv`).
   invented anatomy). Switch to `cfg.edf.channels.mode = 'map'` and edit
   `cfg.edf.channels.map` with the real label -> region names once you've
   confirmed the montage for a given study.
+- **Per-file mapping from a recording log.** `cfg.edf.channels.mode = 'log'`
+  reads `cfg.edf.channels.log_file` (`EEG_recording_log.xlsx`: `Filename`,
+  `Animal ID`, `Port`, `HPCr_channel`, `HPCl_channel`) and, for each EDF,
+  picks the row matching (`cfg.edf.subject_id`, EDF filename) -- never the
+  filename alone, since animals recorded together share one filename. Port +
+  channel gives the EDF label (`A1` + `C2` -> `EEG A1C2`, or `A1C2` in older
+  exports); regions are named `cfg.edf.channels.log_regions` (`HPCr`, `HPCl`)
+  regardless of port, so runs stay comparable when an animal changes port.
+  An EDF with no log row, or whose logged channels aren't in the file, fails
+  `edf_import` and is reported in `qc_report.csv`. `run_all_subjects.m` /
+  `run_all_subjects.ps1` run every subject folder this way.
 
 ### Testing status
 

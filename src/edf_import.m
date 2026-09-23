@@ -250,9 +250,54 @@ function [labels, regions] = resolve_channels(info, cfg)
         case 'all'
             labels = labels_avail(:)';
             regions = labels;
+        case 'log'
+            [labels, regions] = resolve_channels_from_log(info, labels_avail, cfg);
         otherwise
             error('edf_import:BadChannelMode', ...
-                'cfg.edf.channels.mode must be ''list'', ''map'', or ''all'' (got ''%s'').', cfg.edf.channels.mode);
+                'cfg.edf.channels.mode must be ''list'', ''map'', ''all'', or ''log'' (got ''%s'').', cfg.edf.channels.mode);
+    end
+end
+
+function [labels, regions] = resolve_channels_from_log(info, labels_avail, cfg)
+% Per-file mapping from cfg.edf.channels.log_file: the row matching
+% (subject, EDF filename) gives Port + HPCr/HPCl channel, e.g. 'A1' + 'C2'
+% -> EDF label 'EEG A1C2' (or 'A1C2': older exports have no 'EEG ' prefix).
+% Animal IDs are compared with any trailing '-s' dropped ('001-s' == '001').
+    if isempty(cfg.edf.channels.log_file)
+        error('edf_import:BadConfig', 'cfg.edf.channels.log_file is required when cfg.edf.channels.mode = ''log''.');
+    end
+    if isempty(cfg.edf.subject_id)
+        error('edf_import:BadConfig', 'cfg.edf.subject_id is required when cfg.edf.channels.mode = ''log''.');
+    end
+
+    T = load_recording_log(cfg.edf.channels.log_file);
+    [~, stem] = fileparts(char(info.Filename));
+    strip_s = @(s) regexprep(s, '-s$', '');
+    hit = strcmp(T.filename, stem) & strcmp(strip_s(T.animal_id), strip_s(cfg.edf.subject_id));
+    if ~any(hit)
+        error('edf_import:NotInLog', 'No row for animal "%s", file "%s" in recording log %s.', ...
+            cfg.edf.subject_id, stem, cfg.edf.channels.log_file);
+    end
+    if nnz(hit) > 1
+        error('edf_import:DuplicateLogRow', '%d rows for animal "%s", file "%s" in recording log %s.', ...
+            nnz(hit), cfg.edf.subject_id, stem, cfg.edf.channels.log_file);
+    end
+    row = T(hit, :);
+
+    regions = cfg.edf.channels.log_regions;
+    chans = {row.hpcr{1}, row.hpcl{1}};
+    norm = @(s) upper(regexprep(regexprep(s, '^EEG\s*', '', 'ignorecase'), '\s', ''));
+    avail_norm = cellfun(norm, labels_avail, 'UniformOutput', false);
+    labels = cell(1, numel(chans));
+    for i = 1:numel(chans)
+        want = norm([row.port{1} chans{i}]);
+        idx = find(strcmp(avail_norm, want), 1);
+        if isempty(idx)
+            error('edf_import:ChannelNotFound', ...
+                'Recording log says %s = %s%s for animal "%s", file "%s", but it is not in the EDF. Available labels: %s', ...
+                regions{i}, row.port{1}, chans{i}, cfg.edf.subject_id, stem, strjoin(labels_avail, ', '));
+        end
+        labels{i} = labels_avail{idx};
     end
 end
 
