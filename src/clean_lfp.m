@@ -1,8 +1,9 @@
-function result = clean_lfp(data, cfg)
-% CLEAN_LFP  Outlier removal stage. Ports the amplitude-threshold outlier
-% logic from complete_pipeline_seizures.m (STEP 2) verbatim: same fixed
-% thresholds, same k_factor/MAD auto thresholds, same >0.1% auto-switch
-% rule, same linear interpolation of flagged samples.
+function result = clean_lfp(data, cfg, case_spec)
+% CLEAN_LFP  Outlier removal, THEN mains notch (see below), THEN write.
+% Outlier removal ports the amplitude-threshold logic from
+% complete_pipeline_seizures.m (STEP 2) verbatim: same fixed thresholds,
+% same k_factor/MAD auto thresholds, same >0.1% auto-switch rule, same
+% linear interpolation of flagged samples.
 %
 % Adaptation for gaps (NaN): every statistic (median, MAD, std, range) is
 % computed over valid (non-NaN) samples only, gap samples are never
@@ -12,10 +13,27 @@ function result = clean_lfp(data, cfg)
 % the output unchanged.
 %
 %   result = clean_lfp(data, cfg)
+%   result = clean_lfp(data, cfg, case_spec)
 %
-%   data : struct from load_lfp_txt.m (loaded from an edf_import.m txt,
-%          or any txt following the same header convention)
-%   cfg  : struct from pipeline_config.m
+%   data      : struct from load_lfp_txt.m (loaded from an edf_import.m
+%               txt, or any txt following the same header convention).
+%               When it has already been through precondition_lfp.m, its
+%               gain_applied/quality/etc. fields are carried into this
+%               clean file's header; when called standalone without one
+%               (the 2-arg form), the case system is treated as inactive
+%               ('normal': gain off, notch off) -- unchanged from before
+%               the case system existed.
+%   cfg       : struct from pipeline_config.m
+%   case_spec : struct from resolve_case.m (gain_mode, notch_mode,
+%               case_applied, case_source, suggested_case -- only
+%               notch_mode and the reporting fields are used here; gain
+%               was already applied upstream by precondition_lfp.m).
+%               Defaults to the inactive 'normal' case if omitted.
+%
+% Outliers are removed BEFORE the notch, not after: large transients
+% (movement artifacts, the outliers themselves) can ring a narrow IIR
+% bandstop filter, so removing them first keeps that ringing from ever
+% being introduced.
 %
 % OUTPUT (struct result):
 %   .signal, .valid_mask, .fs, .t_rel, .session_start, .meta, .file
@@ -25,6 +43,12 @@ function result = clean_lfp(data, cfg)
 %                 auto_switch, switched_reason, n_outliers, outlier_pct,
 %                 signal_range_original, signal_range_clean
 %   .outlier_info : [global_idx, original_value] for every flagged sample
+%   .notch      : applied, freqs_used, blocks_skipped
+
+    if nargin < 3 || isempty(case_spec)
+        case_spec = struct('gain_mode', 'off', 'gain', NaN, 'notch_mode', 'off', ...
+            'case_applied', 'normal', 'case_source', 'default', 'suggested_case', '');
+    end
 
     signal = data.signal(:);
     fs = data.fs;
@@ -83,14 +107,35 @@ function result = clean_lfp(data, cfg)
     n_outliers = size(outlier_info, 1);
     outlier_pct = 100 * n_outliers / n_valid;
 
-    clean_valid = clean_signal(valid_mask);
-    clean_min = min(clean_valid);
-    clean_max = max(clean_valid);
-
     fprintf('clean_lfp: %s -> %d/%d valid samples flagged (%.4f%%), thresholds=[%.1f, %.1f] uV (%s)\n', ...
         data.file, n_outliers, n_valid, outlier_pct, min_allowed, max_allowed, threshold_type);
 
-    %% ---- header: carry input header, append cleaning fields --------------
+    %% ---- notch (after outliers -- see header comment for why) ------------
+    if strcmp(case_spec.notch_mode, 'auto') && ~(isfield(data, 'quality') && isfield(data.quality, 'quality_class'))
+        warning('clean_lfp:AutoNotchNoQuality', ...
+            '%s: notch_mode=''auto'' but no quality info is available (run precondition_lfp.m first); leaving notch off.', ...
+            data.file);
+        notch_active = false;
+    else
+        notch_active = resolve_notch_active(case_spec.notch_mode, quality_or_defaults(data).quality_class);
+    end
+
+    if notch_active
+        [final_signal, notch_blocks_skipped, notch_freqs_used] = apply_notch_blocks(clean_signal, valid_mask, fs, cfg);
+        fprintf('clean_lfp: %s -> notch applied at [%s] Hz (%d block(s) skipped, too short)\n', ...
+            data.file, num2str(notch_freqs_used), notch_blocks_skipped);
+    else
+        final_signal = clean_signal;
+        notch_blocks_skipped = 0;
+        notch_freqs_used = [];
+    end
+
+    clean_valid = final_signal(valid_mask);
+    clean_min = min(clean_valid);
+    clean_max = max(clean_valid);
+
+    %% ---- header: carry input header, append cleaning + case/quality/notch fields
+    q = quality_or_defaults(data);
     clean_pairs = { ...
         'clean_source_file',      data.file; ...
         'threshold_type',         threshold_type; ...
@@ -103,6 +148,33 @@ function result = clean_lfp(data, cfg)
         'outlier_pct',             outlier_pct; ...
         'signal_range_original_uV', sprintf('[%.6g, %.6g]', obs_min, obs_max); ...
         'signal_range_clean_uV',   sprintf('[%.6g, %.6g]', clean_min, clean_max); ...
+        'case_applied',            case_spec.case_applied; ...
+        'case_source',             case_spec.case_source; ...
+        'suggested_case',          case_spec.suggested_case; ...
+        'gain_mode',               case_spec.gain_mode; ...
+        'notch_mode',              case_spec.notch_mode; ...
+        'gain_applied',            field_or(data, 'gain_applied', 1); ...
+        'gain_estimate_raw',       field_or(data, 'gain_estimate_raw', NaN); ...
+        'gain_source',             field_or(data, 'gain_source', 'off'); ...
+        'reference_used',          field_or(data, 'reference_used', NaN); ...
+        'reference_source',        field_or(data, 'reference_source', 'off'); ...
+        'sensitivity_equivalent_uV_per_mm', field_or(data, 'sensitivity_equivalent_uV_per_mm', 100); ...
+        'sigma_band_uV_original',  q.sigma_band_uV; ...
+        'mad_uV_original',         q.mad_uV; ...
+        'line_ratio_db',           q.line_ratio_db; ...
+        'line_ratio_p95_db',       q.line_ratio_p95_db; ...
+        'pct_time_line_high',      q.pct_time_line_high; ...
+        'quality_class',           q.quality_class; ...
+        'quantization_step_uV',    q.quantization_step_uV; ...
+        'snr_quantization_db',     q.snr_quantization_db; ...
+        'adc_codes_span',          q.adc_codes_span; ...
+        'pct_clipped',             q.pct_clipped; ...
+        'flat_fraction',           q.flat_fraction; ...
+        'notch_applied',           notch_active; ...
+        'notch_freqs',             num2str(notch_freqs_used); ...
+        'notch_halfwidth_hz',      cfg.precondition.notch_halfwidth_hz; ...
+        'notch_order',             cfg.precondition.notch_order; ...
+        'notch_blocks_skipped',    notch_blocks_skipped; ...
     };
     header_pairs = [data.header_pairs; clean_pairs];
 
@@ -120,13 +192,13 @@ function result = clean_lfp(data, cfg)
     txt_path = fullfile(out_dir, out_name);
 
     if cfg.general.overwrite || exist(txt_path, 'file') ~= 2
-        write_lfp_txt(txt_path, header_pairs, clean_signal);
+        write_lfp_txt(txt_path, header_pairs, final_signal);
     end
     copy_sibling_gaps_csv(data.folder, out_dir, cfg.general.overwrite);
 
     %% ---- assemble result ---------------------------------------------
     result = struct();
-    result.signal = clean_signal;
+    result.signal = final_signal;
     result.valid_mask = valid_mask;
     result.fs = fs;
     result.t_rel = data.t_rel;
@@ -149,6 +221,8 @@ function result = clean_lfp(data, cfg)
         'outlier_pct', outlier_pct, ...
         'signal_range_original_uV', [obs_min, obs_max], ...
         'signal_range_clean_uV', [clean_min, clean_max]);
+    result.case_spec = case_spec;
+    result.notch = struct('applied', notch_active, 'freqs_used', notch_freqs_used, 'blocks_skipped', notch_blocks_skipped);
 end
 
 %% ======================================================================
@@ -202,4 +276,27 @@ function v = pick(value, default_if_empty)
     else
         v = value;
     end
+end
+
+function v = field_or(s, name, default)
+    if isfield(s, name)
+        v = s.(name);
+    else
+        v = default;
+    end
+end
+
+function q = quality_or_defaults(data)
+% precondition_lfp.m attaches data.quality (a signal_quality.m struct);
+% when clean_lfp.m is called standalone without it (the 2-arg form), the
+% quality header fields are written as NaN/'' rather than left out, so
+% every clean.txt has the same header shape regardless of how it was made.
+    if isfield(data, 'quality')
+        q = data.quality;
+        return;
+    end
+    q = struct('sigma_band_uV', NaN, 'mad_uV', NaN, 'line_ratio_db', NaN, ...
+        'line_ratio_p95_db', NaN, 'pct_time_line_high', NaN, 'quality_class', '', ...
+        'quantization_step_uV', NaN, 'snr_quantization_db', NaN, 'adc_codes_span', NaN, ...
+        'pct_clipped', NaN, 'flat_fraction', NaN);
 end

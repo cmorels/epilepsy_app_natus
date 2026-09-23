@@ -158,6 +158,18 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
         valid_duration_s = n_valid / fs_ch;
         n_gaps = height(gaps_table);
 
+        digital_span = info.DigitalMax(ch_idx) - info.DigitalMin(ch_idx);
+        physical_min_uV = info.PhysicalMin(ch_idx) * scale;
+        physical_max_uV = info.PhysicalMax(ch_idx) * scale;
+        if digital_span > 0
+            % abs(): some EDFs declare an inverted calibration for a given
+            % channel (PhysicalMin > PhysicalMax); the step SIZE is still
+            % positive regardless of that polarity convention.
+            quantization_step_uV = abs(physical_max_uV - physical_min_uV) / digital_span;
+        else
+            quantization_step_uV = NaN;
+        end
+
         if recognized
             columns_label = 'amplitude_microvolts';
         else
@@ -186,7 +198,10 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
             'total_duration_s',       total_duration_s; ...
             'valid_duration_s',       valid_duration_s; ...
             'units',                  units_out; ...
-            'columns',                columns_label ...
+            'columns',                columns_label; ...
+            'quantization_step_uV',   quantization_step_uV; ...
+            'physical_min_uV',        physical_min_uV; ...
+            'physical_max_uV',        physical_max_uV ...
         };
 
         txt_name = sprintf('%s_%s.txt', base_name, region);
