@@ -83,6 +83,25 @@ function result = run_pipeline_edf(input_folder, cfg)
     clean_status_tally = containers.Map('KeyType', 'char', 'ValueType', 'double');
     n_unusable = 0;
     n_suggested_mismatch = 0;
+    bilateral_on = isfield(cfg, 'bilateral') && ~strcmp(cfg.bilateral.rescue_mode, 'off');
+    if bilateral_on
+        log_line(log_file, sprintf('bilateral_reconcile: rescue_mode=%s, match_tol_s=%g, exclude_rescued_from_iid=%d', ...
+            cfg.bilateral.rescue_mode, cfg.bilateral.match_tol_s, cfg.bilateral.exclude_rescued_from_iid));
+    end
+    [ll_accept, ll_reject, band_on] = resolve_ll_band(cfg);
+    if band_on
+        log_line(log_file, sprintf('review band: ll_reject=%.2f, ll_accept=%.2f (robust branch); event categories + figures under 03_seizures/<category>/', ...
+            ll_reject, ll_accept));
+    end
+    if band_on && bilateral_on
+        error('run_pipeline_edf:BandAndRescue', ...
+            ['cfg.bilateral.rescue_mode=''%s'' together with the review band (ll_accept/ll_reject) is not supported yet. ' ...
+             'Set cfg.bilateral.rescue_mode=''off'', or cfg.seizure_robust.ll_accept = ll_reject = [] to switch the band off.'], ...
+            cfg.bilateral.rescue_mode);
+    end
+    % Both need every channel of a recording before any seizure output is written.
+    deferred = bilateral_on || band_on;
+    any_robust = false;
 
     for f = 1:numel(files)
         file_path = fullfile(files(f).folder, files(f).name);
@@ -104,12 +123,13 @@ function result = run_pipeline_edf(input_folder, cfg)
             file_subject_map(files(f).name) = manifest.subject_id{1};
         end
 
+        channel_ctx = {};
         for c = 1:height(manifest)
             row = manifest(c, :);
             region = row.region{1};
             stages = {}; errors = {}; warnings_list = {};
             raw_data = []; q = []; case_spec = []; clean_data = []; clean_stats = []; notch_info = [];
-            seizure_results = []; iid_results = [];
+            seizure_results = []; seizure_mode = '';
 
             try
                 raw_data = load_lfp_txt(row.txt_file{1});
@@ -155,6 +175,7 @@ function result = run_pipeline_edf(input_folder, cfg)
             end
 
             if ~isempty(case_spec)
+                seizure_mode = case_spec.seizure_mode;  % known even if clean fails (bilateral_reconcile reports such a channel)
                 try
                     [clean_data, clean_stats, clean_status, notch_info] = run_clean_stage( ...
                         raw_data, q, case_spec, file_cfg, dirs.clean);
@@ -171,8 +192,18 @@ function result = run_pipeline_edf(input_folder, cfg)
             end
 
             if ~isempty(clean_data)
-                file_cfg.seizure.output_dir = dirs.seizures;
                 seizure_mode = case_spec.seizure_mode;
+                reconciled_channel = bilateral_on && strcmp(seizure_mode, 'robust');
+                if reconciled_channel
+                    % The robust detector's own figures are numbered per channel;
+                    % with reconciliation on they go to a throwaway folder and
+                    % save_bilateral_seizure_figures.m writes the real ones.
+                    % Legacy channels are never reconciled: their figures stay.
+                    detector_dir = tempname();
+                    file_cfg.seizure.output_dir = detector_dir;
+                else
+                    file_cfg.seizure.output_dir = dirs.seizures;
+                end
                 try
                     if strcmp(seizure_mode, 'robust')
                         seizure_results = detect_seizures_robust(clean_data, file_cfg);
@@ -188,37 +219,47 @@ function result = run_pipeline_edf(input_folder, cfg)
                     log_error(log_file, files(f).name, region, 'detect_seizures', ME);
                     errors{end+1} = sprintf('detect_seizures(%s): %s', seizure_mode, ME.message); %#ok<AGROW>
                 end
-
-                file_cfg.iid.output_dir = dirs.iid;
-                try
-                    seizures_for_iid = table_or_empty(seizure_results, 'seizures');
-                    iid_results = detect_iid(clean_data, seizures_for_iid, file_cfg);
-                    stages{end+1} = 'iid'; %#ok<AGROW>
-                catch ME
-                    log_error(log_file, files(f).name, region, 'detect_iid', ME);
-                    errors{end+1} = sprintf('detect_iid: %s', ME.message); %#ok<AGROW>
+                if reconciled_channel && isfolder(detector_dir)
+                    rmdir(detector_dir, 's');
                 end
             end
 
-            session_start = pick_session_start(raw_data, clean_data, cfg.general.timezone);
+            ctx = struct('row', row, 'region', region, 'source_name', files(f).name, ...
+                'stages', {stages}, 'errors', {errors}, 'warnings_list', {warnings_list}, ...
+                'q', q, 'case_spec', case_spec, 'clean_data', clean_data, 'clean_stats', clean_stats, ...
+                'notch_info', notch_info, 'seizure_results', seizure_results, 'seizure_mode', seizure_mode, ...
+                'session_start', pick_session_start(raw_data, clean_data, cfg.general.timezone));
+            raw_data = []; %#ok<NASGU>
+            any_robust = any_robust || strcmp(seizure_mode, 'robust');
 
-            if ~isempty(seizure_results)
-                seizure_event_parts{end+1} = build_seizure_event_rows( ...
-                    seizure_results.seizures, region, row.subject_id{1}, session_start, row.source_file{1}, ...
-                    clean_data.valid_mask, clean_data.t_rel, file_cfg.seizure.edge_trim_s, seizure_mode); %#ok<AGROW>
-                seizure_summary_parts{end+1} = build_seizure_summary_row(row, session_start, seizure_results, file_cfg); %#ok<AGROW>
+            if deferred
+                % IID and every seizure output wait until all channels of this
+                % recording are detected (bilateral_reconcile.m / bilateral_events.m).
+                channel_ctx{end+1} = ctx; %#ok<AGROW>
+            else
+                out = finalize_channel(ctx, file_cfg, dirs, log_file, false, false);
+                [seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts] = ...
+                    append_parts(out, seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts);
             end
-            if ~isempty(iid_results)
-                iid_event_parts{end+1} = build_iid_event_rows( ...
-                    iid_results.spike_complex_table, iid_results.burst_table, region, row.subject_id{1}, session_start, row.source_file{1}); %#ok<AGROW>
-                iid_summary_parts{end+1} = build_iid_summary_row(row, session_start, iid_results); %#ok<AGROW>
-                iid_burst_parts{end+1} = build_iid_burst_rows(iid_results.burst_table, region, row.subject_id{1}, row.source_file{1}, session_start.TimeZone); %#ok<AGROW>
-            end
-
-            info = qc_info_full(row, session_start, stages, errors, warnings_list, ...
-                clean_data, clean_stats, seizure_results, q, case_spec, notch_info, file_cfg);
-            qc_parts{end+1} = build_qc_row(info); %#ok<AGROW>
         end
+
+        if deferred && ~isempty(channel_ctx)
+            if bilateral_on
+                channel_ctx = reconcile_file_channels(channel_ctx, file_cfg, dirs, log_file);
+            end
+            outs = cell(1, numel(channel_ctx));
+            for c = 1:numel(channel_ctx)
+                outs{c} = finalize_channel(channel_ctx{c}, file_cfg, dirs, log_file, bilateral_on, band_on);
+            end
+            if band_on
+                outs = finalize_file_events(outs, channel_ctx, file_cfg, dirs, log_file);
+            end
+            for c = 1:numel(outs)
+                [seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts] = ...
+                    append_parts(outs{c}, seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts);
+            end
+        end
+        clear channel_ctx outs
     end
 
     for i = 1:numel(row_matched)
@@ -230,15 +271,38 @@ function result = run_pipeline_edf(input_folder, cfg)
     end
 
     tz = cfg.general.timezone;
-    seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
-    seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+    events_on = band_on && any_robust;  % event columns only if the run had robust channels (legacy-only: just ll_status)
+    if bilateral_on
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz));
+    elseif band_on
+        ev_kinds = {'ll_status'};
+        if events_on
+            ev_kinds{end+1} = 'seizures_events';
+            seizure_summary_parts = cellfun(@(t) add_event_columns(t, 'seizures_summary'), seizure_summary_parts, 'UniformOutput', false);
+        end
+        for k = ev_kinds
+            seizure_event_parts = cellfun(@(t) add_event_columns(t, k{1}), seizure_event_parts, 'UniformOutput', false);
+        end
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_events(tz, events_on));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events_on));
+    else
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+    end
     iid_events = vertcat_or_empty(iid_event_parts, @() empty_iid_events_table(tz));
     iid_summary = vertcat_or_empty(iid_summary_parts, @() empty_iid_summary_table(tz));
     iid_bursts = vertcat_or_empty(iid_burst_parts, @() empty_iid_bursts_table(tz));
     gaps_summary = vertcat_or_empty(gap_parts, @() empty_gaps_table(tz));
     qc_report = vertcat_or_empty(qc_parts, @() empty_qc_table(tz));
 
-    natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    if bilateral_on
+        natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    elseif events_on
+        natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    else
+        natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    end
 
     paths = write_all_summaries(dirs.summaries, seizures_events, seizures_summary, ...
         iid_events, iid_summary, iid_bursts, gaps_summary, qc_report, natus_review_sheet);
@@ -259,6 +323,372 @@ function result = run_pipeline_edf(input_folder, cfg)
     result.qc_report = qc_report;
     result.natus_review_sheet = natus_review_sheet;
     result.paths = paths;
+    result.bilateral_on = bilateral_on;
+end
+
+%% ======================================================================
+% Per-channel tail of the pipeline (IID + every CSV row of that channel),
+% shared by the unreconciled path (called right after each channel's
+% detection, exactly the order the pipeline always had) and the
+% reconciled one (called after bilateral_reconcile.m, once per channel).
+function out = finalize_channel(ctx, file_cfg, dirs, log_file, bilateral_on, band_on)
+    row = ctx.row;
+    region = ctx.region;
+    stages = ctx.stages; errors = ctx.errors; warnings_list = ctx.warnings_list;
+    clean_data = ctx.clean_data;
+    seizure_results = ctx.seizure_results;
+    iid_results = [];
+
+    if ~isempty(clean_data)
+        file_cfg.iid.output_dir = dirs.iid;
+        try
+            seizures_for_iid = seizures_for_iid_of(seizure_results, file_cfg, bilateral_on, band_on);
+            iid_results = detect_iid(clean_data, seizures_for_iid, file_cfg);
+            stages{end+1} = 'iid';
+        catch ME
+            log_error(log_file, ctx.source_name, region, 'detect_iid', ME);
+            errors{end+1} = sprintf('detect_iid: %s', ME.message);
+        end
+    end
+
+    session_start = ctx.session_start;
+    out = struct('seizure_events', {{}}, 'seizure_summary', {{}}, 'iid_events', {{}}, ...
+        'iid_summary', {{}}, 'iid_bursts', {{}}, 'qc', {{}});
+
+    if ~isempty(seizure_results)
+        if bilateral_on
+            if isempty(clean_data)  % failed robust channel reported by bilateral_reconcile (no signal to check gaps on)
+                valid_mask = []; t_rel = [];
+            else
+                valid_mask = clean_data.valid_mask; t_rel = clean_data.t_rel;
+            end
+            out.seizure_events = {build_seizure_event_rows_bilateral( ...
+                seizure_results.seizures, region, row.subject_id{1}, session_start, row.source_file{1}, ...
+                valid_mask, t_rel, file_cfg.seizure.edge_trim_s, ctx.seizure_mode)};
+            out.seizure_summary = {build_seizure_summary_row_bilateral(row, session_start, seizure_results, file_cfg)};
+        else
+            T = build_seizure_event_rows( ...
+                seizure_results.seizures, region, row.subject_id{1}, session_start, row.source_file{1}, ...
+                clean_data.valid_mask, clean_data.t_rel, file_cfg.seizure.edge_trim_s, ctx.seizure_mode);
+            summary_sr = seizure_results;
+            if band_on
+                % ll_status per row (legacy rows: always 'accepted'); every
+                % PRE-EXISTING summary column keeps counting accepted rows only,
+                % in_band rows are counted apart (finalize_file_events).
+                S = seizure_results.seizures;
+                if ismember('ll_status', S.Properties.VariableNames)
+                    T.ll_status = S.ll_status;
+                    summary_sr.seizures = S(strcmp(S.ll_status, 'accepted'), :);
+                else
+                    T.ll_status = repmat({'accepted'}, height(T), 1);
+                end
+            end
+            out.seizure_events = {T};
+            out.seizure_summary = {build_seizure_summary_row(row, session_start, summary_sr, file_cfg)};
+        end
+    end
+    if ~isempty(iid_results)
+        out.iid_events = {build_iid_event_rows( ...
+            iid_results.spike_complex_table, iid_results.burst_table, region, row.subject_id{1}, session_start, row.source_file{1})};
+        out.iid_summary = {build_iid_summary_row(row, session_start, iid_results)};
+        out.iid_bursts = {build_iid_burst_rows(iid_results.burst_table, region, row.subject_id{1}, row.source_file{1}, session_start.TimeZone)};
+    end
+
+    info = qc_info_full(row, session_start, stages, errors, warnings_list, ...
+        clean_data, ctx.clean_stats, seizure_results, ctx.q, ctx.case_spec, ctx.notch_info, file_cfg);
+    out.qc = {build_qc_row(info)};
+end
+
+function outs = finalize_file_events(outs, ctxs, cfg, dirs, log_file)
+% Review band on: group this recording's robust detections into events
+% (bilateral_events.m), draw the per-event individual + joint figures into
+% 03_seizures/<category>/ (save_event_figures.m), and append the per-channel
+% event counts / rates to each channel's summary row. A recording with no
+% robust channel is left with ll_status only (legacy rows are unchanged).
+    robust = cellfun(@(c) strcmp(c.seizure_mode, 'robust'), ctxs);
+    if ~any(robust)
+        return;
+    end
+    has_rows = cellfun(@(o) ~isempty(o.seizure_events), outs);
+    parts = cellfun(@(o) o.seizure_events{1}, outs(has_rows), 'UniformOutput', false);
+    heights = cellfun(@height, parts);
+    if isempty(parts)
+        E = add_event_columns(empty_seizure_events_table(cfg.general.timezone), 'll_status');
+    else
+        E = vertcat(parts{:});
+    end
+    [E, notes] = bilateral_events(E, cfg);
+
+    % one column per robust channel with a usable clean signal, detected or not
+    channels = struct('region', {}, 'subject_id', {}, 'session_start', {}, 'label', {}, 'fs', {}, ...
+        't_rel', {}, 'signal', {}, 'trace', {});
+    for i = find(robust)
+        c = ctxs{i};
+        if isempty(c.clean_data)
+            continue;
+        end
+        try
+            tr = seizure_energy_trace(c.clean_data, cfg);
+            if isempty(tr.blocks)
+                trimmed = zeros(0, 2);
+            else
+                trimmed = [vertcat(tr.blocks.trimmed_start), vertcat(tr.blocks.trimmed_end)];
+            end
+            [ll_full, ll_med] = line_length_trace(tr.bp_full, trimmed, c.clean_data.fs, cfg);
+        catch ME
+            notes{end+1} = sprintf('[%s] no traces for the event figures (%s): column omitted', c.region, ME.message); %#ok<AGROW>
+            continue;
+        end
+        label = '';
+        if isfield(c.clean_data.meta, 'channel_label')
+            label = strtrim(c.clean_data.meta.channel_label);
+        end
+        channels(end+1) = struct('region', c.region, 'subject_id', c.row.subject_id{1}, ...
+            'session_start', c.session_start, 'label', label, 'fs', c.clean_data.fs, ...
+            't_rel', c.clean_data.t_rel, 'signal', c.clean_data.signal, ...
+            'trace', struct('energy_full', tr.energy_full, 'bp_full', tr.bp_full, 'll_full', ll_full, ...
+                'll_median_global', ll_med, 'threshold', tr.threshold)); %#ok<AGROW>
+    end
+    try
+        [E, fnotes] = save_event_figures(E, channels, dirs.seizures, cfg);
+        notes = [notes, fnotes];
+    catch ME
+        log_error(log_file, ctxs{1}.source_name, '', 'save_event_figures', ME);
+    end
+    for i = 1:numel(notes)
+        log_line(log_file, ['  [events] ' notes{i}]);
+    end
+    ev = E(strcmp(E.seizure_mode, 'robust') & ~isnan(E.event_id), :);
+    n_cat = @(cat) numel(unique(ev.event_id(strcmp(ev.category, cat))));
+    log_line(log_file, sprintf('  [events] %d event(s): %d Crisis, %d Candidates, %d Candidates_in_band', ...
+        numel(unique(ev.event_id)), n_cat('Crisis'), n_cat('Candidates'), n_cat('Candidates_in_band')));
+
+    % split E back into the per-channel parts, in their original order
+    k = 0;
+    idx_rows = find(has_rows);
+    for j = 1:numel(idx_rows)
+        outs{idx_rows(j)}.seizure_events = {E(k + (1:heights(j)), :)};
+        k = k + heights(j);
+    end
+
+    % per-channel summary columns (event_columns('seizures_summary'))
+    for i = 1:numel(outs)
+        if isempty(outs{i}.seizure_summary)
+            continue;
+        end
+        S = outs{i}.seizure_summary{1};
+        mine = E(strcmp(E.region, ctxs{i}.region) & strcmp(E.seizure_mode, 'robust'), :);
+        total_s = 60 * S.total_duration_min;
+        t_crisis = sum(mine.duration_s(strcmp(mine.category, 'Crisis')));
+        t_cc = sum(mine.duration_s(ismember(mine.category, {'Crisis', 'Candidates'})));
+        S.n_events_crisis = n_cat('Crisis');
+        S.n_events_candidates = n_cat('Candidates');
+        S.n_events_candidates_in_band = n_cat('Candidates_in_band');
+        S.n_accepted_this_channel = nnz(strcmp(mine.ll_status, 'accepted'));
+        S.n_in_band_this_channel = nnz(strcmp(mine.ll_status, 'in_band'));
+        S.total_seizure_time_s_crisis = t_crisis;
+        S.pct_time_in_seizure_crisis = 100 * t_crisis / total_s;
+        S.total_seizure_time_s_crisis_candidates = t_cc;
+        S.pct_time_in_seizure_crisis_candidates = 100 * t_cc / total_s;
+        outs{i}.seizure_summary = {S};
+    end
+end
+
+function [se, ss, ie, is, ib, qc] = append_parts(out, se, ss, ie, is, ib, qc)
+    se = [se, out.seizure_events];
+    ss = [ss, out.seizure_summary];
+    ie = [ie, out.iid_events];
+    is = [is, out.iid_summary];
+    ib = [ib, out.iid_bursts];
+    qc = [qc, out.qc];
+end
+
+function T = seizures_for_iid_of(seizure_results, cfg, bilateral_on, band_on)
+% Unreconciled: the detector's table, as always -- except that with the
+% review band on, 'in_band' rows are dropped unless
+% cfg.bilateral.exclude_in_band_from_iid (default false: unconfirmed events
+% must not remove time from the spike analysis). Reconciled: every
+% reported row (accepted + rescued + imputed) when
+% cfg.bilateral.exclude_rescued_from_iid, else only the accepted ones;
+% the exclusion zone's source_id is then the SHARED seizure_id.
+    if isempty(seizure_results)
+        T = [];
+        return;
+    end
+    if ~bilateral_on
+        T = seizure_results.seizures;
+        if band_on && ismember('ll_status', T.Properties.VariableNames) && ~cfg.bilateral.exclude_in_band_from_iid
+            T = T(strcmp(T.ll_status, 'accepted'), :);
+        end
+        return;
+    end
+    S = seizure_results.seizures;
+    if ~cfg.bilateral.exclude_rescued_from_iid
+        S = S(ismember(S.detection_status, {'accepted', 'not_reconciled'}), :);
+    end
+    T = table(S.seizure_id, S.start_s, S.end_s, S.duration_s, S.start_abs, S.end_abs, S.block_id, ...
+        'VariableNames', {'id', 'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', 'block_id'});
+end
+
+%% ======================================================================
+function ctxs = reconcile_file_channels(ctxs, file_cfg, dirs, log_file)
+% Runs bilateral_reconcile.m over the robust-branch channels of ONE
+% recording, then writes each reconciled channel's figures + .mat into
+% 03_seizures/. Legacy channels are left exactly as detect_seizures.m
+% produced them (own figures, own per-channel ids) and only tagged
+% 'not_reconciled' so the CSV schema stays uniform.
+    n = numel(ctxs);
+    pc = struct('region', cell(1, n), 'subject_id', [], 'source_file', [], 'session_start', [], ...
+        'seizure_mode', [], 'seizure_results', [], 'data', []);
+    for i = 1:n
+        c = ctxs{i};
+        pc(i).region = c.region;
+        pc(i).subject_id = c.row.subject_id{1};
+        pc(i).source_file = c.row.source_file{1};
+        pc(i).session_start = c.session_start;
+        pc(i).seizure_mode = c.seizure_mode;
+        pc(i).seizure_results = c.seizure_results;
+        pc(i).data = c.clean_data;
+    end
+
+    try
+        rec = bilateral_reconcile(pc, file_cfg);
+    catch ME
+        for i = 1:n
+            log_error(log_file, ctxs{i}.source_name, ctxs{i}.region, 'bilateral_reconcile', ME);
+            ctxs{i}.errors{end+1} = sprintf('bilateral_reconcile: %s', ME.message);
+            if ~isempty(ctxs{i}.seizure_results)
+                ctxs{i}.seizure_results = mark_unreconciled(ctxs{i}.seizure_results, 'failed');
+            end
+        end
+        return;
+    end
+
+    for i = 1:n
+        if isempty(rec(i).trace)
+            sr = rec(i).seizure_results;
+            if ~isempty(sr) && isfield(sr, 'detection_failed')
+                % failed robust channel: one imputed row per event, no metrics, no figures
+                ctxs{i}.seizure_results = sr;
+                ctxs{i}.stages{end+1} = 'bilateral';
+                ctxs{i}.warnings_list{end+1} = sprintf('seizure detection failed: %d event(s) reported as imputed without metrics', ...
+                    sr.bilateral.n_imputed);
+                log_line(log_file, sprintf('  [%s] bilateral_reconcile: detection FAILED on this channel -> %d imputed row(s) without metrics; %d event(s) across %d channel(s)', ...
+                    ctxs{i}.region, sr.bilateral.n_imputed, sr.bilateral.n_events_session, sr.bilateral.n_channels_total));
+            elseif ~isempty(ctxs{i}.seizure_results)
+                % legacy channel: left exactly as detect_seizures.m produced it
+                ctxs{i}.seizure_results = mark_unreconciled(ctxs{i}.seizure_results, ctxs{i}.seizure_mode);
+            end
+            continue;
+        end
+        sr = rec(i).seizure_results;
+        [~, fname] = fileparts(ctxs{i}.clean_data.file);
+        base = strrep(fname, '_clean', '');
+        sr.mat_file = ''; sr.fig_file = ''; sr.png_file = '';
+        try
+            fl = save_bilateral_seizure_figures(dirs.seizures, base, file_cfg, ctxs{i}.clean_data, rec(i).trace, ...
+                sr.seizures, ctxs{i}.seizure_mode, ctxs{i}.region);
+            sr.fig_file = fl.panorama_fig;
+            sr.png_file = fl.panorama_png;
+        catch ME
+            warning('run_pipeline_edf:BilateralFigures', 'Could not save reconciled seizure figures for %s: %s', base, ME.message);
+            ctxs{i}.warnings_list{end+1} = sprintf('bilateral figures failed: %s', ME.message);
+        end
+        if height(sr.seizures) > 0
+            sr.mat_file = fullfile(dirs.seizures, [base '_seizures.mat']);
+            seizure_results = sr;
+            save(sr.mat_file, 'seizure_results');
+        end
+        b = sr.bilateral;
+        log_line(log_file, sprintf('  [%s] bilateral_reconcile: %d accepted, %d rescued, %d imputed -> %d row(s); %d event(s) across %d channel(s)', ...
+            ctxs{i}.region, b.n_accepted, b.n_rescued, b.n_imputed, b.n_reported, b.n_events_session, b.n_channels_total));
+        ctxs{i}.stages{end+1} = 'bilateral';
+        ctxs{i}.seizure_results = sr;
+    end
+end
+
+function sr = mark_unreconciled(sr, why)
+% Channel not reconciled (legacy branch, or reconciliation failed): keep
+% the detector's own rows, under their per-channel id, tagged
+% 'not_reconciled' (never 'accepted'), so the output schema stays uniform
+% and nothing claims a comparison across channels that did not happen.
+% Idempotent: a table already carrying detection_status is left alone.
+    if isfield(sr, 'bilateral')
+        return;
+    end
+    S = sr.seizures;
+    n = height(S);
+    for col = {'over_max_duration', 'll_ratio', 'peak_energy_ratio', 'hf_ratio_db', 'envelope_cv'}
+        if ~ismember(col{1}, S.Properties.VariableNames)
+            if strcmp(col{1}, 'over_max_duration')
+                S.(col{1}) = false(n, 1);
+            else
+                S.(col{1}) = nan(n, 1);
+            end
+        end
+    end
+    S.seizure_id = S.id;
+    S.detection_status = repmat({'not_reconciled'}, n, 1);
+    S.accepted_in_n_channels = nan(n, 1);
+    S.accepted_in_regions = repmat({''}, n, 1);
+    S.n_channels_total = nan(n, 1);
+    S.is_bilateral_accepted = false(n, 1);
+    S.fragmented = false(n, 1);
+    S.ref_start_s = S.start_s;
+    S.ref_end_s = S.end_s;
+    S.rejected_by = repmat({''}, n, 1);
+    sr.seizures_accepted = sr.seizures;
+    sr.seizures = S;
+    sr.bilateral = struct('rescue_mode', ['not_reconciled:' why], 'n_accepted', n, 'n_reported', n, 'n_events', n, ...
+        'n_rescued', 0, 'n_imputed', 0, 'n_channels_total', NaN, 'n_events_session', NaN);
+end
+
+function T = build_seizure_event_rows_bilateral(seizures, region, subject_id, session_start, source_file, valid_mask, t_rel, edge_trim_s, seizure_mode)
+% Reconciled counterpart of build_seizure_event_rows: same 18 columns in the
+% same order, where seizure_id is now the SHARED event id, plus
+% bilateral_columns('seizures_events') appended (channel_seizure_id holds
+% the detector's own per-channel index, NaN on rescued/imputed rows).
+    n = height(seizures);
+    if n == 0
+        T = empty_seizure_events_table_bilateral(session_start.TimeZone);
+        return;
+    end
+    T = seizures;
+    T.channel_seizure_id = T.id;
+    T.id = [];
+    T.subject_id = repmat({subject_id}, n, 1);
+    T.region = repmat({region}, n, 1);
+    T.session_start = repmat(session_start, n, 1);
+    T.source_file = repmat({source_file}, n, 1);
+    T.adjacent_to_gap = compute_adjacent_to_gap(seizures.start_s, seizures.end_s, valid_mask, t_rel, edge_trim_s);
+    T.seizure_mode = repmat({seizure_mode}, n, 1);
+    base_names = empty_seizure_events_table(session_start.TimeZone).Properties.VariableNames;
+    T = T(:, [base_names, bilateral_columns('seizures_events')]);
+end
+
+function T = build_seizure_summary_row_bilateral(row, session_start, seizure_results, cfg)
+% Every pre-existing column keeps its meaning: it describes what THIS
+% channel's detector accepted (seizures_accepted). The appended columns
+% give the same counts/time/percentage twice, *_accepted and *_reported,
+% so an arrastrada crisis never silently inflates a per-channel rate.
+    base = seizure_results;
+    base.seizures = seizure_results.seizures_accepted;
+    T = build_seizure_summary_row(row, session_start, base, cfg);
+
+    S = seizure_results.seizures;
+    acc = ismember(S.detection_status, {'accepted', 'not_reconciled'});
+    total_s = row.total_duration_s;
+    t_acc = sum(S.duration_s(acc));
+    t_rep = sum(S.duration_s);
+    T.n_seizures_accepted = nnz(acc);
+    T.n_seizures_reported = height(S);
+    T.n_events_reported = numel(unique(S.seizure_id));
+    T.n_rescued = nnz(strcmp(S.detection_status, 'rescued'));
+    T.n_imputed = nnz(strcmp(S.detection_status, 'imputed'));
+    T.total_seizure_time_s_accepted = t_acc;
+    T.pct_time_in_seizure_accepted = 100 * t_acc / total_s;
+    T.total_seizure_time_s_reported = t_rep;
+    T.pct_time_in_seizure_reported = 100 * t_rep / total_s;
 end
 
 %% ======================================================================
@@ -449,14 +879,6 @@ function session_start = pick_session_start(raw_data, clean_data, tz)
     end
     if isempty(session_start.TimeZone)
         session_start.TimeZone = tz;
-    end
-end
-
-function T = table_or_empty(seizure_results, field)
-    if isempty(seizure_results)
-        T = [];
-    else
-        T = seizure_results.(field);
     end
 end
 

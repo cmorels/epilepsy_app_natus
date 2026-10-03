@@ -35,6 +35,23 @@ module, now that the code is parametrized enough to allow that.
   by a brief dip below threshold, or a prolonged artifact, can be recorded
   as one very long "seizure".
 
+## Review band (`detect_seizures_robust.m`, `ll_accept` / `ll_reject`)
+
+- **1.90 and 1.60 come from four seizures of ONE animal (005).** Three
+  video-confirmed seizures exceed 3.4 in both hemispheres; the one of
+  31/03 22:29:16 sits at 1.87 and 1.96, against false positives at 1.71 and
+  1.60 -- the single 1.75 cut decided that seizure on a ~2 % margin in one
+  channel. The band edges are placed around those few values, not derived
+  from a distribution; recalibrate on more animals before trusting them.
+- **The band adds review material, it does not re-sort it.**
+  `Candidates_in_band` events were discarded outright by the binary cut;
+  counting them as seizures would inflate every rate. Summaries keep them
+  apart and out of every default rate.
+- **event_id depends on the run.** It is re-assigned chronologically on
+  every run; if detections change between runs, the same number can point
+  to a different event. With `overwrite = false` an existing figure file of
+  the same event_id in the right folder is kept as is.
+
 ## IID / spike detection (`detect_iid.m`, ported from `IID_detection_FINAL.m`)
 
 - **Baseline search is quantized** (100:5:130 µV steps) and clamped at
@@ -51,6 +68,38 @@ module, now that the code is parametrized enough to allow that.
 - **Exclusion-zone buffer (5 s) and burst grouping window (5 s) are fixed**
   and not related to any measured property of the recording (e.g. seizure
   post-ictal suppression length, which varies by animal/seizure severity).
+
+## Bilateral reconciliation (`bilateral_reconcile.m`)
+
+- **Systematic rescue can mask genuinely unilateral seizures.** With
+  `rescue_mode = 'rescue_and_impute'` every event accepted in one
+  hemisphere is *reported* in all of them, so row counts, per-channel
+  `n_seizures_reported` and `*_reported` time-in-seizure are identical
+  across hemispheres by construction -- including for a seizure that was
+  truly focal. Laterality must be read from `accepted_in_n_channels` /
+  `is_bilateral_accepted` / `accepted_in_regions` (and each row's own
+  `ll_ratio`), and per-channel rates from the `*_accepted` columns, never
+  from the `*_reported` ones.
+- **An imputed row is not a measurement of a seizure in that channel.** It
+  is the other channel's window, measured here; its metrics say what that
+  window looks like in this hemisphere, not that a seizure happened there.
+- **Only line-length rejections can be rescued.** Crossings the robust
+  branch dropped as too short after merging (< `min_duration_s`) are not
+  exposed by `detect_seizures_robust.m`, so such an event is imputed, not
+  rescued, even if the channel had a near-miss there.
+- **A failed channel is reported, not measured.** When a robust channel's
+  detection fails (e.g. 005 `20260326 mTor` HPCr: flat signal, 99.98 %
+  outliers), each event of that recording gets an `imputed` row there with
+  `rejected_by='detection_failed'` and NaN metrics. Such rows must be
+  excluded from any per-channel metric analysis; they only say "this
+  hemisphere could not be assessed for this event".
+- **Robust branch only.** Legacy channels are not reconciled; in a
+  recording where one channel is robust and another legacy (different
+  cases per channel), the legacy one neither receives nor contributes
+  events, and its ids stay per-channel.
+- **`match_tol_s = 5` s is a round number**, not derived from measured
+  inter-hemispheric propagation delays; a larger value merges more nearby
+  but distinct events, a smaller one splits one event in two.
 
 ## Cross-cutting
 

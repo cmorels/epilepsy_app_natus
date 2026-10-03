@@ -145,6 +145,22 @@ cfg.precondition.notch_order = 4;        % designfilt bandstopiir FilterOrder
 %%      see KNOWN_ISSUES.md for that validation's size and limits.
 cfg.seizure_robust.ll_window_s = 2;       % line-length window; same time scale as the energy trace's movmean
 cfg.seizure_robust.ll_threshold = 1.75;   % x ll_median_global; stable operating point measured between 1.7 and 1.8 on animal 005
+% Review band on ll_ratio (three levels instead of the single ll_threshold cut):
+%   ll_ratio >= ll_accept              -> 'accepted'
+%   ll_reject <= ll_ratio < ll_accept  -> 'in_band' (kept, needs human review)
+%   ll_ratio <  ll_reject              -> 'rejected'
+% Where 1.90 / 1.60 come from: the ll_ratio values measured on animal 005,
+% where three video-confirmed seizures exceed 3.4 in both hemispheres but
+% the one of 31/03 22:29:16 sits at 1.87 and 1.96, against false positives
+% at 1.71 and 1.60 -- i.e. the single 1.75 cut decides that seizure on a
+% ~2 % margin in one channel. Four seizures of ONE animal: see KNOWN_ISSUES.md.
+% BACKWARD COMPATIBILITY: set either to [] or NaN and BOTH fall back to
+% ll_threshold with the review band switched off entirely (zero width, and
+% every output byte-identical to before the band existed). Setting both
+% explicitly to ll_threshold keeps the band machinery on with zero width,
+% which reproduces the binary classification. See utils/resolve_ll_band.m.
+cfg.seizure_robust.ll_accept = 1.90;
+cfg.seizure_robust.ll_reject = 1.60;
 cfg.seizure_robust.merge_gap_s = 2;       % merge energy-threshold crossings separated by this much or less, BEFORE the duration filter
 cfg.seizure_robust.min_duration_s = 10;   % applied AFTER merging (applying it before, like the legacy branch does, is what lost the animal-005 GT1/GT4 seizures)
 cfg.seizure_robust.max_duration_s = 60;   % bounds the merge so an IID train can't chain indefinitely; also reflects clinical experience that a seizure rarely runs longer. Events past this are KEPT and flagged over_max_duration, never silently dropped
@@ -152,6 +168,38 @@ cfg.seizure_robust.bilateral_tol_s = 5;   % overlap tolerance for the cross-chan
 cfg.seizure_robust.hf_band = [80 250];    % Hz; informative hf_ratio_db band (movement-related high-frequency power) -- never a filter, see KNOWN_ISSUES.md non-convulsive-seizure caveat
 cfg.seizure_robust.hf_reference_band = [5 40]; % Hz; hf_ratio_db's reference/denominator band
 cfg.seizure_robust.dual_report = false;   % when true, run_pipeline_edf.m runs BOTH branches on every file and writes the non-primary one to seizures_events_alt.csv
+
+%% ---- Cross-channel seizure reconciliation (src/bilateral_reconcile.m) --
+% A seizure is dropped only if EVERY channel of the animal rejected it; if
+% one channel accepted it, it is reported in all of them under a shared
+% seizure_id, tagged accepted / rescued / imputed per channel.
+% Robust-branch channels only; legacy channels pass through unchanged
+% (tagged 'not_reconciled').
+% 'off' (default) keeps every existing run reproducible byte for byte.
+% 'rescue_and_impute' is the RECOMMENDED mode for normal use; 'rescue'
+% (no imputation, channels can end up with different row counts) is for
+% diagnosis only. See README.md "Bilateral reconciliation".
+cfg.bilateral.rescue_mode = 'off';            % 'off' | 'rescue' | 'rescue_and_impute'
+cfg.bilateral.match_tol_s = 5;                % detections of different channels closer than this (or overlapping) are one event
+cfg.bilateral.exclude_rescued_from_iid = true; % IID exclusion zones also cover rescued/imputed rows (methodological choice, keep configurable)
+cfg.bilateral.require_same_subject = true;    % never group channels of different animals (grouping is always per recording/session)
+cfg.bilateral.exclude_in_band_from_iid = false; % 'in_band' robust detections do NOT exclude IID time by default (unconfirmed; excluding them would bias spike rates down)
+
+%% ---- Event categories + organized figures (src/bilateral_events.m) -----
+% Active whenever the review band is on (see resolve_ll_band.m): robust
+% detections of the same animal + session are grouped into events
+% (event_id), each classified 'Crisis' (accepted in >= 2 channels),
+% 'Candidates' (accepted in exactly 1) or 'Candidates_in_band' (accepted
+% in none, in_band in >= 1), with figures under
+% 03_seizures/<category>/{individual,joint}/. See README.md "Event categories".
+% Hemisphere is resolved from the REGION name only (never from the channel
+% label, which changes between recordings); case-insensitive, trimmed.
+% A region in neither list is still processed (hemisphere 'unknown') and
+% gets an extra joint-figure column to the right, with a log warning.
+cfg.output.hemisphere.left_regions = {'HPCl', 'HPCleft', 'HPC_L'};
+cfg.output.hemisphere.right_regions = {'HPCr', 'HPCright', 'HPC_R'};
+cfg.output.joint_figures = true;
+cfg.output.joint_figure_format = {'png', 'fig'};
 
 %% ---- Detector evaluation against ground truth (src/evaluate_detections.m)
 cfg.eval.match_tol_s = 10;                % seconds of allowed edge slack when matching a detection to a ground-truth event

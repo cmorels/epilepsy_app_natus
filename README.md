@@ -249,6 +249,193 @@ handling: `session_start` (from the EDF's own header) and the output
 filenames already differentiate sessions, so they can all go through one
 `run_pipeline_edf` call with one fixed `subject_id`.
 
+## Review band and event categories (robust branch)
+
+### Review band
+
+`detect_seizures_robust.m`'s final filter is no longer a single cut at
+`ll_threshold`: each candidate gets an `ll_status`
+
+| `ll_status` | rule |
+|---|---|
+| `accepted` | `ll_ratio >= cfg.seizure_robust.ll_accept` (default 1.90) |
+| `in_band` | `ll_reject <= ll_ratio < ll_accept` -- kept, needs review |
+| `rejected` | `ll_ratio < cfg.seizure_robust.ll_reject` (default 1.60) |
+
+`.seizures` holds accepted + in_band rows, `.rejected_events` the rejected
+ones, `.candidates` all of them (`kept = ll_status ~= 'rejected'`). The
+line-length panel shows both lines with the band shaded. Legacy rows
+(`detect_seizures.m`, untouched) are always `ll_status = 'accepted'`: the
+band is a robust-branch concept only. **Backward compatibility:** set
+`ll_accept` or `ll_reject` to `[]`/NaN and the band is OFF -- every output
+is byte-identical to the binary pipeline; `ll_accept = ll_reject = 1.75`
+keeps the machinery on with a zero-width band and reproduces the binary
+classification.
+
+### Events and categories (`src/bilateral_events.m`)
+
+Robust detections of the same **(subject_id, session_start)** -- never the
+EDF file, which in log mode holds several animals -- are grouped across
+channels (overlap or gap < `cfg.seizure_robust.bilateral_tol_s`,
+transitive; two rows of the same channel are never merged, they share the
+`event_id` with `fragmented = true`). Each event gets a new **`event_id`**
+(1..K per animal + session, chronological, across all categories;
+`seizure_id` keeps its meaning and values as the channel-local index) and a
+category, counting channels:
+
+| category | rule |
+|---|---|
+| `Crisis` | accepted in >= 2 channels |
+| `Candidates` | accepted in exactly 1 channel |
+| `Candidates_in_band` | accepted in none, in_band in >= 1 |
+
+**Warning:** `Candidates_in_band` is material the binary pipeline
+discarded outright -- the band does not reorder what existed, it adds new
+material to review. It is never mixed into Crisis counts or rates.
+
+### Hemisphere mapping
+
+The hemisphere comes ONLY from the **region** name (`cfg.edf.channels.mode =
+'log'` names them `HPCr` = right, `HPCl` = left), through
+`cfg.output.hemisphere.left_regions` / `right_regions` (case-insensitive,
+trimmed; default `{'HPCl','HPCleft','HPC_L'}` / `{'HPCr','HPCright','HPC_R'}`).
+Never from the channel label (A5C2 / A7C1 ... change between recordings and
+animals) nor from processing order. A region in neither list is processed
+anyway (`hemisphere = 'unknown'`) and gets an extra joint-figure column on
+the right, with a log warning.
+
+### Figures
+
+```
+03_seizures/                       (per-channel .mat and panoramas stay here)
+  Crisis/              individual/   joint/
+  Candidates/          individual/   joint/
+  Candidates_in_band/  individual/   joint/
+individual: {subject}_{session}_event{ID:02d}_{region}.png/.fig   (every robust channel, detected or not)
+joint     : {subject}_{session}_event{ID:02d}_joint.png/.fig      (cfg.output.joint_figures)
+```
+
+Joint figure = 4 rows (voltage, band-passed, energy + threshold, line
+length + band) x N channels (left hemisphere, right, then unknown), same
+time window and linked x on every panel, **same y-limits across columns
+within each row** (energy row in log scale on every column if the maxima
+differ by > 100x), the event's reference window shaded per column by that
+channel's `ll_status` (or "sin detección"), column headers with region,
+hemisphere, channel, status, `ll_ratio` and distance to the nearest
+threshold, and the absolute start time in the title. Individual and joint
+figures are drawn by the same `utils/plot_trace_*.m` functions. Stale files
+of the same subject + session (event gone or re-categorized) are deleted;
+with `overwrite = false` existing correct files are not redrawn.
+
+### CSVs
+
+- `seizures_events.csv`: `ll_status` + `event_id, category, n_accepted,
+  n_in_band, n_channels_in_group, fragmented, hemisphere,
+  accepted_in_regions, ref_start_s, ref_end_s, figure_individual_path,
+  figure_joint_path` (a legacy-only run adds `ll_status` only).
+- `seizures_summary.csv`: pre-existing columns count **accepted rows only**;
+  appended `n_events_crisis, n_events_candidates, n_events_candidates_in_band,
+  n_accepted_this_channel, n_in_band_this_channel`, and time in seizure
+  twice: `*_crisis` (Crisis only) and `*_crisis_candidates` (Crisis +
+  Candidates). `Candidates_in_band` never enters a rate.
+- `natus_review_sheet.csv`: one row per (event_id, channel), grouped by
+  event, with `category, ll_status, ll_ratio, review_priority` (1 =
+  Candidates, 2 = Candidates_in_band, 3 = Crisis), `figure_joint_path`;
+  `natus_confirmed` is the reviewer's verdict column.
+- IID: in_band rows do not exclude time unless
+  `cfg.bilateral.exclude_in_band_from_iid = true` (default false).
+- `merge_pipeline_runs.m` propagates everything; the event key across runs
+  is (`subject_id`, `session_start`, `event_id`), never renumbered.
+
+The review band and `cfg.bilateral.rescue_mode ~= 'off'` cannot be combined
+yet (the run stops with a clear message); `bilateral_events.m` marks the
+extension point where rescued/imputed rows would plug in.
+
+## Bilateral reconciliation (reconciliación bilateral)
+
+Without it, each channel (hemisphere) is detected and numbered on its
+own: the same seizure can pass the filters in one hemisphere and fall just
+below them in the other (implant quality, attenuation, sitting near a
+threshold), so the two channels of one animal report different counts and
+"seizure 3" of one has nothing to do with "seizure 3" of the other.
+
+`src/bilateral_reconcile.m` runs after detection on every channel of one
+recording and before any seizure CSV, figure or IID exclusion zone:
+**a seizure is dropped only if every channel rejected it; if at least one
+channel accepted it, it is reported in all of them**, under one shared
+`seizure_id` (chronological, 1..K per animal + session).
+
+**It applies to the robust branch only** (channels whose case resolved to
+`seizure_mode = 'robust'`, i.e. `attenuated` / `line` / `both`). Legacy
+channels (`detect_seizures.m`, case `normal`) are never reconciled nor
+used as a reference: they keep their own figures and per-channel ids, and
+their rows are tagged `detection_status = 'not_reconciled'`.
+
+```matlab
+cfg.bilateral.rescue_mode = 'rescue_and_impute'; % RECOMMENDED. 'off' (default) | 'rescue' (diagnosis only)
+cfg.bilateral.match_tol_s = 5;                   % detections of different channels closer than this = one event
+cfg.bilateral.exclude_rescued_from_iid = true;   % IID exclusion zones also cover rescued/imputed rows
+cfg.bilateral.require_same_subject = true;       % never group different animals
+```
+
+Per event and channel, `detection_status` says how that row got there:
+
+| status | meaning | window |
+|---|---|---|
+| `accepted` | this channel's detector accepted it on its own merit | the detector's own |
+| `rescued` | this channel had it as a candidate rejected by the line-length filter (`kept=false` in `detect_seizures_robust.m`'s `.candidates`, `rejected_by='ll_ratio'`) -- the one with the highest `ll_ratio` if several; a candidate is rescued into one event at most | the candidate's OWN limits in this channel |
+| `imputed` | no rejected candidate of this channel overlapped the event | the event's reference window (union of the accepted rows), clipped to one valid block |
+| `imputed`, `rejected_by='detection_failed'` | this (robust) channel's clean or detection stage FAILED -- the failure is still reported, once per event; metrics are NaN (nothing to measure) and no figure is drawn; the channel counts in `n_channels_total` | the event's reference window |
+| `not_reconciled` | legacy channel, or reconciliation failed for that recording | the detector's own |
+
+`ll_ratio`, `peak_energy_ratio`, `hf_ratio_db`, `envelope_cv` and the
+duration are always computed on the row's own window in its own channel,
+never copied (a rescued `ll_ratio=1.62` against the 1.75 cut says the event
+was *close* in that hemisphere, not absent). In `'rescue'` mode, events with
+no candidate get no row, so channels can end up with different counts --
+that mode is for diagnosis, not normal use.
+
+**Unit of analysis changes.** After reconciliation the unit is the *event
+per animal*, not the *detection per channel*. That is why "accepted" and
+"reported" columns coexist and must not be mixed:
+
+- `seizures_events.csv`: `seizure_id` becomes the shared id;
+  `channel_seizure_id` keeps the detector's own per-channel index (NaN on
+  rescued/imputed rows); appended columns `detection_status`,
+  `accepted_in_n_channels`, `accepted_in_regions`, `n_channels_total`,
+  `is_bilateral_accepted` (accepted in >= 2 channels), `fragmented` (this
+  channel contributes more than one row to the same event -- kept as
+  separate rows, never merged), `ref_start_s`/`ref_end_s` (reference
+  window, same on every channel), `rejected_by`. Whether an event was
+  bilateral or unilateral is answered by `accepted_in_n_channels`, never
+  by the row count.
+- `seizures_summary.csv`: every pre-existing column still describes what
+  THIS channel accepted (so `n_seizures` = `n_seizures_accepted`); appended
+  `n_seizures_accepted`, `n_seizures_reported`, `n_events_reported`,
+  `n_rescued`, `n_imputed`, and time-in-seizure twice:
+  `total_seizure_time_s_accepted` / `_reported`,
+  `pct_time_in_seizure_accepted` / `_reported`.
+- `natus_review_sheet.csv`: one row per (seizure_id, channel), grouped by
+  event, with `seizure_id`, `detection_status`, `accepted_in_regions`,
+  `source_file`.
+- `03_seizures/`: figures are drawn by `utils/save_bilateral_seizure_figures.m`
+  (the detectors' own per-channel figures are discarded):
+  `{base}_seizure{seizure_id:02d}.png/.fig`, titled e.g.
+  `Crisis 3 (HPCr, accepted)` / `Crisis 3 (HPCl, rescued, ll_ratio=1.62 < 1.75)` /
+  `Crisis 3 (HPCl, imputed: no candidate in this channel)`; red = accepted,
+  orange = rescued, blue = imputed (legend on every figure), reference
+  window dotted; rescued/imputed outlined dashed on the panorama.
+- IID: with `exclude_rescued_from_iid = true` the exclusion zones include
+  rescued/imputed rows (their `source_id` is the shared `seizure_id`).
+- `merge_pipeline_runs.m` propagates every column and never renumbers:
+  across runs the key is (`subject_id`, `source_file`/`session_start`,
+  `seizure_id`).
+
+With `rescue_mode = 'off'` none of this runs and every output is
+byte-identical to the pipeline before this stage existed. See
+KNOWN_ISSUES.md for why systematic rescue can mask genuinely unilateral
+seizures.
+
 ## Invocation
 
 ```matlab
@@ -260,6 +447,8 @@ cfg.edf.subject_id = '097';                       % '' would derive it from the 
 cfg.paths.output_root = fullfile(pwd, 'pipeline_output');
 % cfg.edf.channels.mode = 'map';                  % once you know the real region names:
 % cfg.edf.channels.map  = containers.Map({'A7C1','A7C3'}, {'HPCleft','HPCright'});
+cfg.bilateral.rescue_mode = 'rescue_and_impute';  % RECOMMENDED: one shared seizure_id per event across hemispheres
+                                                  % (default 'off' = per-channel, unchanged; see "Bilateral reconciliation")
 
 result = run_pipeline_edf('097-s', cfg);           % folder of .edf files
 

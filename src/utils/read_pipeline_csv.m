@@ -20,10 +20,28 @@ function T = read_pipeline_csv(csv_path, kind, tz)
         tz = 'Europe/Paris';
     end
 
+    opts = detectImportOptions(csv_path);
+
     template = empty_table_for(kind, tz);
+    % A reconciled run (cfg.bilateral.rescue_mode ~= 'off', see
+    % bilateral_reconcile.m) appends bilateral_columns(kind) to the seizure
+    % CSVs; read them with their types when present, never drop them.
+    % Each extended schema is recognised by a column only it has (the two
+    % share some names, e.g. fragmented / ref_start_s).
+    bilateral_marker = struct('seizures_events', 'detection_status', 'seizures_summary', 'n_seizures_reported');
+    events_marker = struct('seizures_events', 'event_id', 'seizures_summary', 'n_events_crisis');
+    if isfield(bilateral_marker, kind) && ismember(bilateral_marker.(kind), opts.VariableNames)
+        template = add_bilateral_columns(template, kind);
+    end
+    % Same for the review band / event categories (event_columns.m).
+    if strcmp(kind, 'seizures_events') && ismember('ll_status', opts.VariableNames)
+        template = add_event_columns(template, 'll_status');
+    end
+    if isfield(events_marker, kind) && ismember(events_marker.(kind), opts.VariableNames)
+        template = add_event_columns(template, kind);
+    end
     names = template.Properties.VariableNames;
 
-    opts = detectImportOptions(csv_path);
     missing = setdiff(names, opts.VariableNames);
     optional_defaults = optional_columns_for(kind);
     required_missing = setdiff(missing, keys(optional_defaults));

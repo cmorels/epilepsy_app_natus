@@ -1,5 +1,13 @@
 %% REGENERATE SEIZURE FIGURES FROM MODIFIED .mat FILE
 % Quick script to recreate seizure visualizations after manual edits
+%
+% OBSOLETE for the EDF pipeline (src/): this is Intan-era reference
+% material. It reads Intan txt files through load_LFP_intan_txt.m and a
+% .mat with 'seizures'/'seizure_config' variables, draws its own figures,
+% and knows nothing of 03_seizures/ -- neither the flat per-channel files
+% nor the 03_seizures/<Crisis|Candidates|Candidates_in_band>/{individual,joint}/
+% event folders. To redraw EDF-pipeline figures, re-run run_pipeline_edf.m
+% with cfg.general.overwrite = true (event figures: src/utils/save_event_figures.m).
 
 clear; clc;
 

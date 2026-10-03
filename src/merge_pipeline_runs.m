@@ -63,15 +63,56 @@ function result = merge_pipeline_runs(output_roots, merged_output_dir, tz)
         end
     end
 
-    seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
-    seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+    % Reconciled runs (bilateral_reconcile.m) carry extra seizure columns.
+    % If any run has them, every run's seizure tables get them (backfilled
+    % with detection_status='not_reconciled' for runs that were not
+    % reconciled) so they can be stacked. Rows are only concatenated, never
+    % renumbered: seizure_id is unique within (subject_id, source_file /
+    % session_start), which is the key to use across runs.
+    bilateral = any(cellfun(@(t) ismember('detection_status', t.Properties.VariableNames), seizure_event_parts)) || ...
+        any(cellfun(@(t) ismember('n_seizures_reported', t.Properties.VariableNames), seizure_summary_parts));
+    % Review-band runs (bilateral_events.m) likewise: ll_status and the event
+    % columns are propagated, backfilled for runs without them (ll_status
+    % 'accepted' = what the binary pipeline kept; event_id NaN). The key of
+    % an event across runs is (subject_id, session_start, event_id); nothing
+    % is renumbered.
+    has_ll = any(cellfun(@(t) ismember('ll_status', t.Properties.VariableNames), seizure_event_parts));
+    events = any(cellfun(@(t) ismember('event_id', t.Properties.VariableNames), seizure_event_parts));
+    if has_ll
+        seizure_event_parts = cellfun(@(t) add_event_columns(t, 'll_status'), seizure_event_parts, 'UniformOutput', false);
+    end
+    if events
+        seizure_event_parts = cellfun(@(t) add_event_columns(t, 'seizures_events'), seizure_event_parts, 'UniformOutput', false);
+        seizure_summary_parts = cellfun(@(t) add_event_columns(t, 'seizures_summary'), seizure_summary_parts, 'UniformOutput', false);
+    end
+    if bilateral && (has_ll || events)
+        error('merge_pipeline_runs:MixedRuns', 'Cannot merge reconciled (rescue) runs with review-band runs.');
+    end
+    if has_ll && ~bilateral
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_events(tz, events));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events));
+    elseif bilateral
+        seizure_event_parts = cellfun(@(t) add_bilateral_columns(t, 'seizures_events'), seizure_event_parts, 'UniformOutput', false);
+        seizure_summary_parts = cellfun(@(t) add_bilateral_columns(t, 'seizures_summary'), seizure_summary_parts, 'UniformOutput', false);
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz));
+    else
+        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
+        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+    end
     iid_events = vertcat_or_empty(iid_event_parts, @() empty_iid_events_table(tz));
     iid_summary = vertcat_or_empty(iid_summary_parts, @() empty_iid_summary_table(tz));
     iid_bursts = vertcat_or_empty(iid_burst_parts, @() empty_iid_bursts_table(tz));
     gaps_summary = vertcat_or_empty(gap_parts, @() empty_gaps_table(tz));
     qc_report = vertcat_or_empty(qc_parts, @() empty_qc_table(tz));
 
-    natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    if bilateral
+        natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    elseif events
+        natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    else
+        natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    end
 
     if ~isfolder(merged_output_dir)
         mkdir(merged_output_dir);

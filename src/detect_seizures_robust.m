@@ -84,6 +84,9 @@ function seizure_results = detect_seizures_robust(data, cfg)
     max_duration_samples = round(cfg.seizure_robust.max_duration_s * fs);
     min_duration_s = cfg.seizure_robust.min_duration_s;
     ll_threshold = cfg.seizure_robust.ll_threshold;
+    % Review band (utils/resolve_ll_band.m): off -> the single ll_threshold
+    % cut below, exactly as before; on -> accepted / in_band / rejected.
+    [ll_accept, ll_reject, band_on] = resolve_ll_band(cfg);
 
     hf_ok = cfg.seizure_robust.hf_band(2) < fs / 2;
 
@@ -125,7 +128,11 @@ function seizure_results = detect_seizures_robust(data, cfg)
                 hf_ratio_db = NaN;
             end
 
-            kept = ll_ratio >= ll_threshold;
+            if band_on
+                kept = ll_ratio >= ll_reject;   % accepted OR in_band; ll_status set below
+            else
+                kept = ll_ratio >= ll_threshold;
+            end
             cand_id = cand_id + 1;
             start_s = t_rel(gs);
             end_s = t_rel(ge);
@@ -145,15 +152,30 @@ function seizure_results = detect_seizures_robust(data, cfg)
     end
 
     kept_mask = candidates.kept;
-    seizures = candidates(kept_mask, {'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', ...
-        'block_id', 'over_max_duration', 'll_ratio', 'peak_energy_ratio', 'hf_ratio_db', 'envelope_cv'});
+    seizure_cols = {'start_s', 'end_s', 'duration_s', 'start_abs', 'end_abs', ...
+        'block_id', 'over_max_duration', 'll_ratio', 'peak_energy_ratio', 'hf_ratio_db', 'envelope_cv'};
+    if band_on
+        ll_status = repmat({'rejected'}, height(candidates), 1);
+        ll_status(candidates.ll_ratio >= ll_reject) = {'in_band'};
+        ll_status(candidates.ll_ratio >= ll_accept) = {'accepted'};
+        candidates.ll_status = ll_status;
+        seizure_cols{end+1} = 'll_status';
+    end
+    seizures = candidates(kept_mask, seizure_cols);
     seizures.id = (1:height(seizures))';
     seizures = seizures(:, [end, 1:end-1]);
 
     n_seizures = height(seizures);
-    fprintf('detect_seizures_robust: %s -> %d seizure(s) (median_energy=%.3e, threshold=%.3e, %d/%d blocks usable, %d candidate(s), %d dropped-short, %d dropped-ll)\n', ...
-        data.file, n_seizures, trace.median_energy, trace.threshold, numel(trace.blocks), size(trace.raw_blocks, 1), ...
-        height(candidates), n_dropped_short, sum(~kept_mask));
+    if band_on
+        n_accepted = nnz(strcmp(seizures.ll_status, 'accepted'));
+        fprintf('detect_seizures_robust: %s -> %d accepted + %d in_band [ll_reject %.2f, ll_accept %.2f] (median_energy=%.3e, threshold=%.3e, %d/%d blocks usable, %d candidate(s), %d dropped-short, %d dropped-ll)\n', ...
+            data.file, n_accepted, n_seizures - n_accepted, ll_reject, ll_accept, trace.median_energy, trace.threshold, ...
+            numel(trace.blocks), size(trace.raw_blocks, 1), height(candidates), n_dropped_short, sum(~kept_mask));
+    else
+        fprintf('detect_seizures_robust: %s -> %d seizure(s) (median_energy=%.3e, threshold=%.3e, %d/%d blocks usable, %d candidate(s), %d dropped-short, %d dropped-ll)\n', ...
+            data.file, n_seizures, trace.median_energy, trace.threshold, numel(trace.blocks), size(trace.raw_blocks, 1), ...
+            height(candidates), n_dropped_short, sum(~kept_mask));
+    end
 
     n_merged_segments = n_dropped_short + height(candidates); % Stage-3 output, before the min_duration_s filter
     seizure_results = struct();
@@ -174,6 +196,15 @@ function seizure_results = detect_seizures_robust(data, cfg)
         'rejected_blocks', trace.rejected_blocks);
     seizure_results.fs = fs;
     seizure_results.file = data.file;
+    if band_on
+        % Review band: .seizures holds accepted AND in_band rows (each with
+        % ll_status); .rejected_events only the rejected ones. Added ONLY
+        % with the band on, so a band-off run saves exactly the same struct.
+        seizure_results.rejected_events = candidates(~kept_mask, :);
+        seizure_results.metrics.n_accepted = n_accepted;
+        seizure_results.metrics.n_in_band = n_seizures - n_accepted;
+        seizure_results.band = struct('ll_accept', ll_accept, 'll_reject', ll_reject);
+    end
 
     %% ---- output paths --------------------------------------------------
     out_dir = cfg.seizure.output_dir;
@@ -210,8 +241,13 @@ function seizure_results = detect_seizures_robust(data, cfg)
                 t_rel, signal, trace.bp_full, trace.energy_full, trace.threshold, ...
                 ll_full, ll_median_global, seizures, gap_blocks_t, n_seizures);
 
-            save_zoom_figures_robust(out_dir, base, cfg, t_rel, signal, trace.bp_full, trace.energy_full, ...
-                trace.threshold, ll_full, ll_median_global, seizures, gap_blocks_t);
+            % With the review band on, per-event zooms are drawn after the
+            % cross-channel grouping (bilateral_events.m ->
+            % save_event_figures.m), into 03_seizures/<category>/, by event_id.
+            if ~band_on
+                save_zoom_figures_robust(out_dir, base, cfg, t_rel, signal, trace.bp_full, trace.energy_full, ...
+                    trace.threshold, ll_full, ll_median_global, seizures, gap_blocks_t);
+            end
         catch ME
             warning('detect_seizures_robust:FigureSaveFailed', ...
                 'Could not generate/save seizure figures for %s: %s. Seizure detection results are unaffected.', ...
@@ -306,13 +342,19 @@ function shade_gaps(gap_blocks_t)
 end
 
 function shade_seizures_robust(seizures)
+    in_band = ismember('ll_status', seizures.Properties.VariableNames);
     for k = 1:height(seizures)
         if seizures.over_max_duration(k)
             edge_color = [0.6 0 0.6]; % over-max events get a distinct (purple) outline, still shown, never hidden
         else
             edge_color = 'r';
         end
-        xregion(seizures.start_s(k), seizures.end_s(k), 'FaceColor', [1 0.7 0.7], 'FaceAlpha', 0.4, ...
+        face = [1 0.7 0.7];
+        if in_band && strcmp(seizures.ll_status{k}, 'in_band')
+            face = [1 0.85 0.55];  % review band (see ll_status_style.m); only with the band on
+            edge_color = [0.9 0.45 0];
+        end
+        xregion(seizures.start_s(k), seizures.end_s(k), 'FaceColor', face, 'FaceAlpha', 0.4, ...
             'EdgeColor', edge_color, 'LineWidth', 2);
     end
 end
@@ -359,8 +401,14 @@ function [fig_file, png_file] = save_panorama_figure_robust(out_dir, base, cfg, 
     [t4, y4] = decimate_minmax(t_rel, ll_norm, target_points);
     subplot(4, 1, 4);
     shade_gaps(gap_blocks_t); hold on;
+    [ll_accept, ll_reject, band_on] = resolve_ll_band(cfg);
+    if band_on
+        plot_ll_band(ll_accept, ll_reject);
+    end
     plot(t4, y4, 'Color', [0.6 0.3 0.6], 'LineWidth', 0.5);
-    yline(cfg.seizure_robust.ll_threshold, 'r--', sprintf('ll\\_threshold (%.2f)', cfg.seizure_robust.ll_threshold), 'LineWidth', 2);
+    if ~band_on
+        yline(cfg.seizure_robust.ll_threshold, 'r--', sprintf('ll\\_threshold (%.2f)', cfg.seizure_robust.ll_threshold), 'LineWidth', 2);
+    end
     shade_seizures_robust(seizures);
     title('Line-Length Ratio (Stage 4 filter, median-based)'); xlabel('Time (s)'); ylabel('ll / ll\_median\_global'); grid on; hold off;
 
