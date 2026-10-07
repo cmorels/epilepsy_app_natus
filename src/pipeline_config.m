@@ -29,8 +29,9 @@ cfg.edf.channels.log_regions = {'HPCr', 'HPCl'}; % mode='log': region names for 
 
 cfg.edf.gap_tol_s = 1e-3;   % |actual_dt - DataRecordDuration| beyond this is a gap candidate (matches edf_txt_conversion_Samara.m tol)
 cfg.edf.gap_min_s = 0.5;    % candidates shorter than this are logged as jitter, not a real gap
-cfg.edf.subject_id = '';    % '' -> derive from EDF filename (a warning is logged; set explicitly for real runs)
+cfg.edf.subject_id = '';    % '' -> derive from EDF filename (a warning is logged; set explicitly for real runs). Used EXACTLY as given ('005-s' and '005' are different animals)
 cfg.edf.output_dir = '';    % '' -> caller decides (defaults to pwd when edf_import is run standalone)
+cfg.edf.reuse_import = false; % true: reuse a previous COMPLETE import of the same EDF (01_txt/ + 01_txt/_import_cache/) instead of re-reading it with edfread
 
 % Source-unit (EDF PhysicalDimensions, lower-cased) -> multiplier to microvolts.
 cfg.edf.unit_aliases = containers.Map({'uv', 'microv', 'mv', 'v'}, {1, 1, 1000, 1e6});
@@ -103,6 +104,7 @@ cfg.quality.low_amp_snr_db = 26;        % snr_quantization_db below this -> low_
 cfg.quality.min_snr_quant_db = 12;      % snr_quantization_db below this -> unusable regardless of everything else
 cfg.quality.attenuation_ratio_thr = 3;  % reference/sigma_band_uV above this -> suggested_case='attenuated' in make_cases_template.m
 cfg.quality.reference_sigma_uV = NaN;   % NaN (uncalibrated) by default -- scalar or containers.Map keyed by region; see estimate_reference_sigma.m
+cfg.quality.reference_sigma_fallback_uV = NaN; % used by precondition_lfp.m when reference_sigma_uV has no value for a channel's region; NaN -> gain not applied (warning), never an error
 cfg.quality.recursive_scan = false;     % make_cases_template.m / estimate_reference_sigma.m: search input folder(s) recursively for *.txt
 cfg.quality.min_reference_channels = 5; % warn when a region has fewer channels than this to calibrate a reference from
 
@@ -128,6 +130,18 @@ cfg.cases.profiles = struct( ...
     'attenuated', struct('gain_mode', 'auto', 'notch_mode', 'off', 'seizure_mode', 'robust'), ...
     'line',       struct('gain_mode', 'off',  'notch_mode', 'on',  'seizure_mode', 'robust'), ...
     'both',       struct('gain_mode', 'auto', 'notch_mode', 'on',  'seizure_mode', 'robust'));
+% Case from the recording Excel (EEG_recording_log.xlsx, only with
+% cfg.edf.channels.mode = 'log'): with from_excel = true, each channel's
+% case comes from the Excel's Attenuation column for its (animal, EDF) row
+% -- attenuated -> excel.case_attenuated, else excel.case_clean -- instead
+% of the cases CSV / force / default (see utils/resolve_case_excel.m).
+% Values are compared lower-cased and trimmed; a value in neither list is
+% treated as attenuated, with a warning in qc_report.csv.
+cfg.cases.from_excel = false;
+cfg.cases.excel.case_attenuated = 'both';
+cfg.cases.excel.case_clean = 'line';
+cfg.cases.excel.attenuation_no = {'', 'no', 'none'};
+cfg.cases.excel.attenuation_yes = {'severe', 'mild', 'unsure, perhaps mild'};
 
 %% ---- Preconditioning: gain + notch (src/precondition_lfp.m, --------
 %%      utils/apply_notch_blocks.m), gated by the case system above -----

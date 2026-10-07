@@ -10,21 +10,29 @@ function files = save_bilateral_seizure_figures(out_dir, base, cfg, data, tr, se
 % Writes, into out_dir:
 %   {base}_seizures.fig/.png            panorama; rescued/imputed events
 %                                        outlined with a DASHED edge
-%   {base}_seizure{seizure_id:02d}.fig/.png  one zoom per shared seizure_id
+%   {base}_{status}_seizure{seizure_id:02d}.fig/.png
+%                                        one zoom per shared seizure_id
 %                                        (all of this channel's rows for that
 %                                        id, so a fragmented event is one
-%                                        figure), titled with its status
+%                                        figure), status = this channel's
+%                                        detection_status (accepted /
+%                                        rescued / imputed), also in the title
+%                                        e.g. 005-s_20260329_171443_HPCl_imputed_seizure03.png
 % Colours: accepted = red, rescued = orange, imputed = blue (legend on every
 % figure). The reference window (union of accepted rows across channels)
 % is drawn as black dotted lines on the zoom figures.
 %
-% Any stale {base}_seizure* file from a previous run is deleted first, so
-% the folder never shows more events than seizures_events.csv.
+% Any stale zoom/panorama of this base from a previous run (old
+% {base}_seizure* names included) is deleted first, so the folder never
+% shows more events than seizures_events.csv.
 
     if ~isfolder(out_dir)
         mkdir(out_dir);
     end
     delete(fullfile(out_dir, [base '_seizure*']));
+    for st = {'accepted', 'rescued', 'imputed'}
+        delete(fullfile(out_dir, [base '_' st{1} '_seizure*']));
+    end
     files = struct('panorama_fig', '', 'panorama_png', '', 'zoom', {{}});
     if height(seizures) == 0
         return;
@@ -104,8 +112,9 @@ function files = save_bilateral_seizure_figures(out_dir, base, cfg, data, tr, se
             end
             xlabel('Time (s)'); ylabel(ylabels{p}); grid on; xlim([z0 z1]); hold off;
         end
-        zf = fullfile(out_dir, sprintf('%s_seizure%02d.fig', base, sid));
-        zp = fullfile(out_dir, sprintf('%s_seizure%02d.png', base, sid));
+        tag = regexprep(status, '[^\w\-]', '_');
+        zf = fullfile(out_dir, sprintf('%s_%s_seizure%02d.fig', base, tag, sid));
+        zp = fullfile(out_dir, sprintf('%s_%s_seizure%02d.png', base, tag, sid));
         savefig(fig, zf);
         saveas(fig, zp, 'png');
         close(fig);

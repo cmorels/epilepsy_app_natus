@@ -68,6 +68,10 @@ function T = read_pipeline_csv(csv_path, kind, tz)
         end
     end
 
+    % Only the schema's columns are read; any other column (e.g. the
+    % start_datetime / end_datetime text columns write_all_summaries.m adds
+    % to seizures_events) is ignored, never type-guessed.
+    opts.SelectedVariableNames = present_names;
     Traw = readtable(csv_path, opts);
     Traw = Traw(:, present_names);
     n = height(Traw);
@@ -110,6 +114,8 @@ function m = optional_columns_for(kind)
         m('peak_energy_ratio') = NaN;
         m('hf_ratio_db') = NaN;
         m('envelope_cv') = NaN;
+    elseif strcmp(kind, 'qc')
+        m('excel_attenuation') = {''};  % qc_report.csv written before the Excel-driven case existed
     end
 end
 

@@ -5,8 +5,10 @@ function T = load_recording_log(log_file)
 %   T = load_recording_log(log_file)
 %
 % Expected columns (first sheet): Filename, Animal ID, Port, HPCr_channel,
-% HPCl_channel (others are ignored). Returned T has char/cellstr columns
-% filename, animal_id, port, hpcr, hpcl, whitespace-trimmed.
+% HPCl_channel; optional: Attenuation (others are ignored). Returned T has
+% char/cellstr columns filename, animal_id, port, hpcr, hpcl, attenuation
+% ('' when the Excel has no Attenuation column), whitespace-trimmed.
+% Animal IDs are kept exactly as written ('005-s' and '005' differ).
 %
 % The same Filename appears once per animal recorded simultaneously, so a
 % row is identified by (animal_id, filename), never by filename alone.
@@ -33,13 +35,23 @@ function T = load_recording_log(log_file)
         error('load_recording_log:BadColumns', 'Recording log %s is missing column(s): %s', ...
             log_file, strjoin(missing, ', '));
     end
-    opts.SelectedVariableNames = required;
-    opts = setvartype(opts, required, 'char');
+    has_att = ismember('Attenuation', opts.VariableNames);
+    selected = required;
+    if has_att
+        selected{end+1} = 'Attenuation';
+    end
+    opts.SelectedVariableNames = selected;
+    opts = setvartype(opts, selected, 'char');
     raw = readtable(log_file, opts);
+    if has_att
+        attenuation = strtrim(raw.('Attenuation'));
+    else
+        attenuation = repmat({''}, height(raw), 1);
+    end
 
     T = table(strtrim(raw.('Filename')), strtrim(raw.('Animal ID')), strtrim(raw.('Port')), ...
-        strtrim(raw.('HPCr_channel')), strtrim(raw.('HPCl_channel')), ...
-        'VariableNames', {'filename', 'animal_id', 'port', 'hpcr', 'hpcl'});
+        strtrim(raw.('HPCr_channel')), strtrim(raw.('HPCl_channel')), attenuation, ...
+        'VariableNames', {'filename', 'animal_id', 'port', 'hpcr', 'hpcl', 'attenuation'});
     T = T(~cellfun(@isempty, T.filename), :);
 
     cache_key = key;

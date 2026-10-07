@@ -101,6 +101,33 @@ module, now that the code is parametrized enough to allow that.
   inter-hemispheric propagation delays; a larger value merges more nearby
   but distinct events, a smaller one splits one event in two.
 
+## Campaign settings (`campaign_config.m`, `compute_run_reference.m`)
+
+- **The robust branch now runs on every channel**, so its parameters
+  (calibrated on 4 seizures of ONE animal, 005 -- see above) apply to the
+  whole cohort, not only to a few problem channels.
+- **The gain reference depends on the run.** It is the median amplitude of
+  the non-attenuated channels of the EDFs processed together, so a
+  preliminary run (a few EDFs) and the full campaign give attenuated
+  channels different gains, hence different cleaning and IID results for
+  them. Seizure detection is barely affected (relative thresholds).
+- **The reference falls back silently in quality.** A region with no
+  non-attenuated channel in the run takes the all-regions median
+  (`reference_source = 'fallback'`); a run with none at all applies no
+  gain (`reference_source = 'none'`). Both are flagged in
+  `qc_report.csv`'s warnings, never an error.
+- **Unknown Attenuation values count as attenuated.** Anything in the
+  Excel's Attenuation column other than no / none / empty / severe / mild
+  / "unsure, perhaps mild" (e.g. a typo) gets gain, with a warning.
+- **Attenuation is per (animal, EDF), not per channel.** The Excel column
+  does not say which channel is attenuated, so both channels get the gain.
+- **The notch reaches IID too.** It is applied when cleaning, before both
+  detectors; removing 49-51 Hz slightly lowers the amplitude of spikes and
+  of the IID baseline wherever mains noise was present -- intended, but it
+  makes IID numbers not directly comparable with un-notched runs.
+- **`evaluate_detections.m` is not reconciliation-aware** (see README
+  "Not implemented").
+
 ## Cross-cutting
 
 - **No cross-validation against Natus's own visual/automatic scoring** is

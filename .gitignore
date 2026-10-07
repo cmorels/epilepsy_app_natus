@@ -25,3 +25,6 @@ pipeline_output/
 
 # Local Claude Code tooling state, not part of the project
 .claude/
+
+# Windows thumbnail cache
+Thumbs.db

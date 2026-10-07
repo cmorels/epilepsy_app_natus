@@ -10,7 +10,17 @@ function paths = write_all_summaries(summaries_dir, seizures_events, seizures_su
 % (dd-MMM-yyyy HH:mm:ss) silently truncates to whole seconds, which would
 % otherwise throw away real sub-second precision that start_s/end_s (the
 % authoritative relative-time columns) still carry.
+%
+% seizures_events also gets start_datetime / end_datetime right after
+% seizure_id (local clock time as text, 'dd/MM/yyyy HH:mm:ss', to look the
+% event up in Natus; see add_seizure_datetime_columns.m). If that fails the
+% table is written without them -- it never blocks the summaries.
 
+    try
+        seizures_events = add_seizure_datetime_columns(seizures_events);
+    catch ME
+        warning('write_all_summaries:DatetimeColumns', 'start_datetime/end_datetime not added: %s', ME.message);
+    end
     seizures_events = set_dt_format(seizures_events);
     seizures_summary = set_dt_format(seizures_summary);
     iid_events = set_dt_format(iid_events);

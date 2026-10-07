@@ -25,6 +25,10 @@ function result = merge_pipeline_runs(output_roots, merged_output_dir, tz)
 % OUTPUT (struct result): the 9 merged tables (seizures_events,
 % seizures_summary, iid_events, iid_summary, iid_bursts, gaps_summary,
 % qc_report, natus_review_sheet) and .paths to the written files.
+%
+% Robustness: a run without 05_summaries/, or a CSV that cannot be read,
+% is skipped with a warning (the rest is merged); tables are stacked with
+% utils/robust_vertcat.m, so a column type mismatch never aborts the merge.
 
     if nargin < 3 || isempty(tz)
         tz = 'Europe/Paris';
@@ -41,24 +45,27 @@ function result = merge_pipeline_runs(output_roots, merged_output_dir, tz)
     for r = 1:numel(output_roots)
         summaries_dir = fullfile(output_roots{r}, '05_summaries');
         if ~isfolder(summaries_dir)
-            error('merge_pipeline_runs:MissingRun', ...
-                'No 05_summaries/ found under %s -- is this a run_pipeline_edf.m output_root?', output_roots{r});
+            warning('merge_pipeline_runs:MissingRun', ...
+                'No 05_summaries/ found under %s -- run skipped.', output_roots{r});
+            continue;
         end
         fprintf('merge_pipeline_runs: reading %s\n', summaries_dir);
 
-        seizure_event_parts{end+1} = read_pipeline_csv(fullfile(summaries_dir, 'seizures_events.csv'), 'seizures_events', tz); %#ok<AGROW>
-        seizure_summary_parts{end+1} = read_pipeline_csv(fullfile(summaries_dir, 'seizures_summary.csv'), 'seizures_summary', tz); %#ok<AGROW>
-        iid_event_parts{end+1} = read_pipeline_csv(fullfile(summaries_dir, 'iid_events.csv'), 'iid_events', tz); %#ok<AGROW>
-        iid_summary_parts{end+1} = read_pipeline_csv(fullfile(summaries_dir, 'iid_summary.csv'), 'iid_summary', tz); %#ok<AGROW>
-        iid_burst_parts{end+1} = read_pipeline_csv(fullfile(summaries_dir, 'iid_bursts.csv'), 'iid_bursts', tz); %#ok<AGROW>
-        gaps_r = read_pipeline_csv(fullfile(summaries_dir, 'gaps_summary.csv'), 'gaps', tz);
-        gap_parts{end+1} = gaps_r; %#ok<AGROW>
-        qc_r = read_pipeline_csv(fullfile(summaries_dir, 'qc_report.csv'), 'qc', tz);
-        qc_parts{end+1} = qc_r; %#ok<AGROW>
+        seizure_event_parts = read_part(seizure_event_parts, summaries_dir, 'seizures_events.csv', 'seizures_events', tz);
+        seizure_summary_parts = read_part(seizure_summary_parts, summaries_dir, 'seizures_summary.csv', 'seizures_summary', tz);
+        iid_event_parts = read_part(iid_event_parts, summaries_dir, 'iid_events.csv', 'iid_events', tz);
+        iid_summary_parts = read_part(iid_summary_parts, summaries_dir, 'iid_summary.csv', 'iid_summary', tz);
+        iid_burst_parts = read_part(iid_burst_parts, summaries_dir, 'iid_bursts.csv', 'iid_bursts', tz);
+        gap_parts = read_part(gap_parts, summaries_dir, 'gaps_summary.csv', 'gaps', tz);
+        n_qc = numel(qc_parts);
+        qc_parts = read_part(qc_parts, summaries_dir, 'qc_report.csv', 'qc', tz);
 
-        for i = 1:height(qc_r)
-            if ~isKey(file_subject_map, qc_r.source_file{i})
-                file_subject_map(qc_r.source_file{i}) = qc_r.subject_id{i};
+        if numel(qc_parts) > n_qc
+            qc_r = qc_parts{end};
+            for i = 1:height(qc_r)
+                if ~isKey(file_subject_map, qc_r.source_file{i})
+                    file_subject_map(qc_r.source_file{i}) = qc_r.subject_id{i};
+                end
             end
         end
     end
@@ -89,29 +96,34 @@ function result = merge_pipeline_runs(output_roots, merged_output_dir, tz)
         error('merge_pipeline_runs:MixedRuns', 'Cannot merge reconciled (rescue) runs with review-band runs.');
     end
     if has_ll && ~bilateral
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_events(tz, events));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table_events(tz, events), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events), tz, 'seizures_summary');
     elseif bilateral
         seizure_event_parts = cellfun(@(t) add_bilateral_columns(t, 'seizures_events'), seizure_event_parts, 'UniformOutput', false);
         seizure_summary_parts = cellfun(@(t) add_bilateral_columns(t, 'seizures_summary'), seizure_summary_parts, 'UniformOutput', false);
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz), tz, 'seizures_summary');
     else
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table(tz), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table(tz), tz, 'seizures_summary');
     end
-    iid_events = vertcat_or_empty(iid_event_parts, @() empty_iid_events_table(tz));
-    iid_summary = vertcat_or_empty(iid_summary_parts, @() empty_iid_summary_table(tz));
-    iid_bursts = vertcat_or_empty(iid_burst_parts, @() empty_iid_bursts_table(tz));
-    gaps_summary = vertcat_or_empty(gap_parts, @() empty_gaps_table(tz));
-    qc_report = vertcat_or_empty(qc_parts, @() empty_qc_table(tz));
+    iid_events = robust_vertcat(iid_event_parts, @() empty_iid_events_table(tz), tz, 'iid_events');
+    iid_summary = robust_vertcat(iid_summary_parts, @() empty_iid_summary_table(tz), tz, 'iid_summary');
+    iid_bursts = robust_vertcat(iid_burst_parts, @() empty_iid_bursts_table(tz), tz, 'iid_bursts');
+    gaps_summary = robust_vertcat(gap_parts, @() empty_gaps_table(tz), tz, 'gaps_summary');
+    qc_report = robust_vertcat(qc_parts, @() empty_qc_table(tz), tz, 'qc_report');
 
-    if bilateral
-        natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
-    elseif events
-        natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
-    else
-        natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    try
+        if bilateral
+            natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        elseif events
+            natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        else
+            natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        end
+    catch ME
+        warning('merge_pipeline_runs:ReviewSheet', 'natus_review_sheet could not be built (written empty): %s', ME.message);
+        natus_review_sheet = table(cell(0, 1), 'VariableNames', {'natus_review_sheet_failed'});
     end
 
     if ~isfolder(merged_output_dir)
@@ -138,4 +150,13 @@ function result = merge_pipeline_runs(output_roots, merged_output_dir, tz)
     result.qc_report = qc_report;
     result.natus_review_sheet = natus_review_sheet;
     result.paths = paths;
+end
+
+function parts = read_part(parts, summaries_dir, file_name, kind, tz)
+    p = fullfile(summaries_dir, file_name);
+    try
+        parts{end+1} = read_pipeline_csv(p, kind, tz);
+    catch ME
+        warning('merge_pipeline_runs:ReadFailed', 'Could not read %s -- skipped: %s', p, ME.message);
+    end
 end

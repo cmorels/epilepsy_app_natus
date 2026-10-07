@@ -6,7 +6,7 @@ function T = empty_qc_table(tz)
     types = cell(1, numel(names));
     text_cols = {'subject_id', 'region', 'source_file', 'stages_completed', 'error_messages', 'warning_messages', ...
         'case_applied', 'case_source', 'suggested_case', 'quality_class', 'reference_source', 'gain_source', ...
-        'seizure_threshold_mode', 'iid_threshold_mode'};
+        'seizure_threshold_mode', 'iid_threshold_mode', 'excel_attenuation'};
     for i = 1:numel(names)
         if strcmp(names{i}, 'session_start')
             types{i} = 'datetime';

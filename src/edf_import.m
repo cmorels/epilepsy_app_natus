@@ -21,7 +21,17 @@ function [manifest, gaps_table, file_meta] = edf_import(edf_input, cfg)
 %   manifest   : table, one row per exported channel (subject_id, region,
 %                channel_label, fs, txt_file, n_samples, n_valid_samples,
 %                n_gaps, total_duration_s, valid_duration_s, units,
-%                source_file).
+%                source_file, attenuation -- the Excel's Attenuation cell
+%                for this animal + EDF in mode 'log', '' otherwise).
+%
+% REUSE (cfg.edf.reuse_import = true): a COMPLETE import of the same EDF
+% for the same animal is recorded in <output_dir>/_import_cache/; a later
+% call with the same EDF (same size and date), channels and import
+% parameters returns it without re-reading the EDF, as long as every txt
+% and the gaps CSV it lists still exist. Without a valid record the EDF is
+% imported in full and its files are (re)written even with
+% cfg.general.overwrite = false, so a txt left half-written by an
+% interrupted run is never reused.
 %   gaps_table : table, one row per detected gap across all processed
 %                files (gap_id, start_s, end_s, duration_s, start_abs,
 %                end_abs, prev_record_idx, next_record_idx, source_file).
@@ -77,7 +87,7 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
     end
 
     info = edfinfo(edf_path);
-    [labels, regions] = resolve_channels(info, cfg);
+    [labels, regions, attenuation] = resolve_channels(info, cfg);
 
     source_file_name = char(info.Filename);
     source_format = strtrim(char(info.Reserved));
@@ -88,8 +98,30 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
             'cfg.edf.subject_id is empty; derived subject_id "%s" from EDF filename. Set cfg.edf.subject_id explicitly for real runs.', ...
             subject_id);
     else
-        subject_id = cfg.edf.subject_id;
+        subject_id = strtrim(cfg.edf.subject_id);
     end
+
+    out_dir = cfg.edf.output_dir;
+    if isempty(out_dir)
+        out_dir = pwd;
+    end
+    if ~isfolder(out_dir)
+        mkdir(out_dir);
+    end
+
+    reuse = isfield(cfg.edf, 'reuse_import') && cfg.edf.reuse_import;
+    if reuse
+        cache_file = import_cache_path(out_dir, subject_id, edf_path);
+        [ok, manifest, gaps_table, file_meta] = load_import_cache(cache_file, edf_path, labels, regions, cfg);
+        if ok
+            manifest.attenuation = repmat({attenuation}, height(manifest), 1);  % always the CURRENT Excel value
+            fprintf('edf_import: %s -> reusing complete import (%s)\n', source_file_name, cache_file);
+            return;
+        end
+    end
+    % With reuse on and no valid record, this import is done in full, so its
+    % files are (re)written: an existing txt may be a half-written leftover.
+    write_outputs = cfg.general.overwrite || reuse;
 
     base_datetime = datetime([char(info.StartDate) ' ' char(info.StartTime)], ...
         'InputFormat', cfg.general.session_start_input_format, ...
@@ -115,20 +147,12 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
         rt, dt, record_duration_s, cfg.edf.gap_tol_s, cfg.edf.gap_min_s, session_start);
     gaps_table.source_file = repmat({source_file_name}, height(gaps_table), 1);
 
-    out_dir = cfg.edf.output_dir;
-    if isempty(out_dir)
-        out_dir = pwd;
-    end
-    if ~isfolder(out_dir)
-        mkdir(out_dir);
-    end
-
     date_str = string(session_start, 'yyyyMMdd');
     time_str = string(session_start, 'HHmmss');
     base_name = sprintf('%s_%s_%s', subject_id, date_str, time_str);
 
     gaps_file = fullfile(out_dir, sprintf('%s_gaps.csv', base_name));
-    if cfg.general.overwrite || exist(gaps_file, 'file') ~= 2
+    if write_outputs || exist(gaps_file, 'file') ~= 2
         writetable(gaps_table, gaps_file);
     end
 
@@ -137,7 +161,7 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
     iso_str = char(ss_iso);
     unix_val = posixtime(session_start);
 
-    manifest_rows = cell(0, 12);
+    manifest_rows = cell(0, 13);
     for i = 1:numel(labels)
         label = labels{i};
         region = regions{i};
@@ -206,17 +230,17 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
 
         txt_name = sprintf('%s_%s.txt', base_name, region);
         txt_path = fullfile(out_dir, txt_name);
-        if cfg.general.overwrite || exist(txt_path, 'file') ~= 2
+        if write_outputs || exist(txt_path, 'file') ~= 2
             write_lfp_txt(txt_path, header_pairs, sig);
         end
 
         manifest_rows(end+1, :) = {subject_id, region, label, fs_ch, txt_path, ...
-            n_samples, n_valid, n_gaps, total_duration_s, valid_duration_s, units_out, source_file_name}; %#ok<AGROW>
+            n_samples, n_valid, n_gaps, total_duration_s, valid_duration_s, units_out, source_file_name, attenuation}; %#ok<AGROW>
     end
 
     manifest = cell2table(manifest_rows, 'VariableNames', ...
         {'subject_id', 'region', 'channel_label', 'fs', 'txt_file', 'n_samples', ...
-         'n_valid_samples', 'n_gaps', 'total_duration_s', 'valid_duration_s', 'units', 'source_file'});
+         'n_valid_samples', 'n_gaps', 'total_duration_s', 'valid_duration_s', 'units', 'source_file', 'attenuation'});
 
     file_meta = struct( ...
         'source_file', source_file_name, ...
@@ -232,11 +256,74 @@ function [manifest, gaps_table, file_meta] = edf_import_one(edf_path, cfg)
         'n_jitter', qc.n_jitter, ...
         'n_anomaly', qc.n_anomaly, ...
         'output_dir', out_dir);
+
+    if reuse
+        save_import_cache(cache_file, edf_path, labels, regions, cfg, manifest, gaps_table, file_meta, gaps_file);
+    end
 end
 
 %% ======================================================================
-function [labels, regions] = resolve_channels(info, cfg)
+% Import reuse (cfg.edf.reuse_import). The record is written only after
+% every txt and the gaps CSV of the EDF were written, so its presence
+% means the import completed.
+function p = import_cache_path(out_dir, subject_id, edf_path)
+    [~, stem] = fileparts(edf_path);
+    p = fullfile(out_dir, '_import_cache', sprintf('%s__%s.mat', ...
+        regexprep(subject_id, '[^\w\-]', '_'), regexprep(stem, '[^\w\-]', '_')));
+end
+
+function s = import_signature(cfg)
+% Every parameter that changes what edf_import writes.
+    s = struct('timezone', cfg.general.timezone, 'gap_tol_s', cfg.edf.gap_tol_s, ...
+        'gap_min_s', cfg.edf.gap_min_s, 'unit_keys', {keys(cfg.edf.unit_aliases)}, ...
+        'unit_values', {values(cfg.edf.unit_aliases)});
+end
+
+function [ok, manifest, gaps_table, file_meta] = load_import_cache(cache_file, edf_path, labels, regions, cfg)
+    ok = false; manifest = []; gaps_table = []; file_meta = [];
+    if exist(cache_file, 'file') ~= 2
+        return;
+    end
+    try
+        S = load(cache_file, 'cache');
+        c = S.cache;
+        d = dir(edf_path);
+        same = c.edf_bytes == d.bytes && abs(c.edf_datenum - d.datenum) < 1e-6 && ...
+            isequal(c.labels, labels) && isequal(c.regions, regions) && ...
+            isequal(c.signature, import_signature(cfg));
+        files_ok = all(cellfun(@(p) exist(p, 'file') == 2, c.manifest.txt_file)) && ...
+            exist(c.gaps_file, 'file') == 2;
+        if same && files_ok
+            manifest = c.manifest;
+            gaps_table = c.gaps_table;
+            file_meta = c.file_meta;
+            ok = true;
+        end
+    catch
+        ok = false;  % unreadable record -> import again
+    end
+end
+
+function save_import_cache(cache_file, edf_path, labels, regions, cfg, manifest, gaps_table, file_meta, gaps_file)
+    try
+        cache_dir = fileparts(cache_file);
+        if ~isfolder(cache_dir)
+            mkdir(cache_dir);
+        end
+        d = dir(edf_path);
+        cache = struct('manifest', manifest, 'gaps_table', gaps_table, 'file_meta', file_meta, ...
+            'gaps_file', gaps_file, 'edf_bytes', d.bytes, 'edf_datenum', d.datenum, ...
+            'labels', {labels}, 'regions', {regions}, 'signature', import_signature(cfg));
+        save(cache_file, 'cache');
+    catch ME
+        warning('edf_import:CacheWriteFailed', 'Could not record the import of %s for reuse: %s', edf_path, ME.message);
+    end
+end
+
+%% ======================================================================
+function [labels, regions, attenuation] = resolve_channels(info, cfg)
     labels_avail = cellstr(info.SignalLabels);
+    attenuation = '';
 
     switch cfg.edf.channels.mode
         case 'list'
@@ -251,18 +338,20 @@ function [labels, regions] = resolve_channels(info, cfg)
             labels = labels_avail(:)';
             regions = labels;
         case 'log'
-            [labels, regions] = resolve_channels_from_log(info, labels_avail, cfg);
+            [labels, regions, attenuation] = resolve_channels_from_log(info, labels_avail, cfg);
         otherwise
             error('edf_import:BadChannelMode', ...
                 'cfg.edf.channels.mode must be ''list'', ''map'', ''all'', or ''log'' (got ''%s'').', cfg.edf.channels.mode);
     end
 end
 
-function [labels, regions] = resolve_channels_from_log(info, labels_avail, cfg)
-% Per-file mapping from cfg.edf.channels.log_file: the row matching
-% (subject, EDF filename) gives Port + HPCr/HPCl channel, e.g. 'A1' + 'C2'
-% -> EDF label 'EEG A1C2' (or 'A1C2': older exports have no 'EEG ' prefix).
-% Animal IDs are compared with any trailing '-s' dropped ('001-s' == '001').
+function [labels, regions, attenuation] = resolve_channels_from_log(info, labels_avail, cfg)
+% Per-file mapping from cfg.edf.channels.log_file (the recording Excel):
+% the row matching (subject, EDF filename) gives Port + HPCr/HPCl channel,
+% e.g. 'A1' + 'C2' -> EDF label 'EEG A1C2' (or 'A1C2': older exports have
+% no 'EEG ' prefix), and its Attenuation cell ('' if the Excel has none).
+% Animal IDs are compared EXACTLY (trimmed): '005-s' and '005' are
+% different animals and never match each other.
     if isempty(cfg.edf.channels.log_file)
         error('edf_import:BadConfig', 'cfg.edf.channels.log_file is required when cfg.edf.channels.mode = ''log''.');
     end
@@ -272,17 +361,17 @@ function [labels, regions] = resolve_channels_from_log(info, labels_avail, cfg)
 
     T = load_recording_log(cfg.edf.channels.log_file);
     [~, stem] = fileparts(char(info.Filename));
-    strip_s = @(s) regexprep(s, '-s$', '');
-    hit = strcmp(T.filename, stem) & strcmp(strip_s(T.animal_id), strip_s(cfg.edf.subject_id));
+    hit = strcmp(T.filename, stem) & strcmp(T.animal_id, strtrim(cfg.edf.subject_id));
     if ~any(hit)
-        error('edf_import:NotInLog', 'No row for animal "%s", file "%s" in recording log %s.', ...
+        error('edf_import:NotInLog', 'No row for animal "%s", file "%s" in the Excel %s.', ...
             cfg.edf.subject_id, stem, cfg.edf.channels.log_file);
     end
     if nnz(hit) > 1
-        error('edf_import:DuplicateLogRow', '%d rows for animal "%s", file "%s" in recording log %s.', ...
+        error('edf_import:DuplicateLogRow', '%d rows for animal "%s", file "%s" in the Excel %s.', ...
             nnz(hit), cfg.edf.subject_id, stem, cfg.edf.channels.log_file);
     end
     row = T(hit, :);
+    attenuation = row.attenuation{1};
 
     regions = cfg.edf.channels.log_regions;
     chans = {row.hpcr{1}, row.hpcl{1}};

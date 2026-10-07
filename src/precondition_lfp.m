@@ -44,20 +44,36 @@ function cond = precondition_lfp(data, q, case_spec, cfg)
             end
 
         case 'auto'
+            % Reference: cfg.quality.reference_sigma_uV for this region, else
+            % cfg.quality.reference_sigma_fallback_uV (e.g. every region
+            % pooled, see compute_run_reference.m), else none. Without a
+            % reference, or without a measurable amplitude in this channel,
+            % the gain is NOT applied (gain 1, reference_source='none') with a
+            % warning -- never an error, so the channel is still processed.
             region = field_or(data.meta, 'region', '');
             [reference_used, reference_source] = resolve_reference_value(region, cfg.quality.reference_sigma_uV);
-            if isnan(reference_used)
-                error('precondition_lfp:NoReference', ...
-                    ['%s (region "%s") is declared as a gain case but cfg.quality.reference_sigma_uV has no ' ...
-                     'value for this region. Run estimate_reference_sigma.m and set cfg.quality.reference_sigma_uV first.'], ...
-                    data.file, region);
+            if isnan(reference_used) && isfield(cfg.quality, 'reference_sigma_fallback_uV') && ...
+                    isnumeric(cfg.quality.reference_sigma_fallback_uV) && isscalar(cfg.quality.reference_sigma_fallback_uV) && ...
+                    ~isnan(cfg.quality.reference_sigma_fallback_uV)
+                reference_used = cfg.quality.reference_sigma_fallback_uV;
+                reference_source = 'fallback';
             end
 
             gain_estimate_raw = reference_used / q.sigma_band_uV;
             gain_source = 'auto';
 
             deadband = cfg.precondition.gain_deadband;
-            if gain_estimate_raw >= 1/deadband && gain_estimate_raw <= deadband
+            if isnan(gain_estimate_raw) || isinf(gain_estimate_raw) || gain_estimate_raw <= 0
+                if isnan(reference_used)
+                    reference_source = 'none';
+                    why = 'no reference amplitude for this region (cfg.quality.reference_sigma_uV / reference_sigma_fallback_uV)';
+                else
+                    why = sprintf('no measurable amplitude in this channel (sigma_band_uV = %g)', q.sigma_band_uV);
+                end
+                warning('precondition_lfp:GainNotApplied', '%s (region "%s"): gain NOT applied -- %s.', ...
+                    data.file, region, why);
+                gain_applied = 1;
+            elseif gain_estimate_raw >= 1/deadband && gain_estimate_raw <= deadband
                 gain_applied = 1;
             else
                 [gain_applied, clamped] = clamp_gain(gain_estimate_raw, cfg.precondition.gain_max);

@@ -4,6 +4,15 @@ function result = run_pipeline_edf(input_folder, cfg)
 % every .edf in input_folder.
 %
 %   result = run_pipeline_edf(input_folder, cfg)
+%   result = run_pipeline_edf({'path/a.EDF', 'path/b.EDF'}, cfg)
+%
+% input_folder is a folder (every .edf in it) or a cell array of .edf
+% paths (only those; a listed file that does not exist gets a qc_report
+% row with the error, the run continues).
+%
+% Case of each channel: cfg.cases.from_excel = true -> from the recording
+% Excel's Attenuation column (utils/resolve_case_excel.m, see
+% campaign_config.m); otherwise cases CSV / force / default (resolve_case.m).
 %
 % Output layout under cfg.paths.output_root:
 %   01_txt/        txt per channel + gaps CSV (edf_import.m)
@@ -30,7 +39,13 @@ function result = run_pipeline_edf(input_folder, cfg)
 % Robustness: a failing file never aborts the batch. Every stage call is
 % individually try/caught; failures are logged (file, region, stage,
 % message, line) into qc_report.csv and the run log, and the loop moves on
-% with whatever partial results are available for that channel.
+% with whatever partial results are available for that channel. Each
+% file's result rows are also saved to logs/checkpoints/file_NNN.mat as
+% soon as the file is done; the final consolidation stamps one TimeZone on
+% every datetime column and falls back to text concatenation if a table
+% still cannot be stacked (utils/robust_vertcat.m), so a type mismatch can
+% no longer throw away the whole run. The checkpoints are deleted once
+% 05_summaries/ is written, and kept (with the error in the log) if not.
 %
 % Resumability (scoped, see README.md):
 %   - 02_clean is genuinely skipped (not just not-overwritten) when its
@@ -53,19 +68,21 @@ function result = run_pipeline_edf(input_folder, cfg)
     if nargin < 2 || isempty(cfg)
         cfg = pipeline_config();
     end
-    if ~isfolder(input_folder)
-        error('run_pipeline_edf:BadInput', 'Not a folder: %s', input_folder);
+    [files, missing_inputs, input_desc] = resolve_edf_inputs(input_folder);
+    if isempty(files) && isempty(missing_inputs)
+        error('run_pipeline_edf:NoFilesFound', 'No .edf files found in: %s', input_desc);
     end
 
     dirs = make_output_dirs(cfg.paths.output_root);
     log_file = start_log(dirs.logs);
     save_config_used(cfg, cfg.paths.output_root);
-
-    files = discover_edf_files(input_folder);
-    log_line(log_file, sprintf('run_pipeline_edf: %d EDF file(s) found in %s', numel(files), input_folder));
-    if isempty(files)
-        error('run_pipeline_edf:NoFilesFound', 'No .edf files found in: %s', input_folder);
+    checkpoint_dir = fullfile(dirs.logs, 'checkpoints');
+    if isfolder(checkpoint_dir)
+        rmdir(checkpoint_dir, 's');  % stale checkpoints of an earlier run in this output_root
     end
+
+    log_line(log_file, sprintf('run_pipeline_edf: %d EDF file(s) from %s', numel(files), input_desc));
+    tz = cfg.general.timezone;
 
     cases_table = table();
     if ~isempty(cfg.cases.file)
@@ -78,6 +95,13 @@ function result = run_pipeline_edf(input_folder, cfg)
     iid_event_parts = {}; iid_summary_parts = {}; iid_burst_parts = {};
     gap_parts = {}; qc_parts = {};
     file_subject_map = containers.Map('KeyType', 'char', 'ValueType', 'char');
+
+    for i = 1:numel(missing_inputs)
+        [~, mname, mext] = fileparts(missing_inputs{i});
+        log_line(log_file, sprintf('  ERROR [%s | | input] listed EDF not found: %s', [mname mext], missing_inputs{i}));
+        qc_parts{end+1} = build_qc_row(qc_info_minimal(cfg.edf.subject_id, '', [mname mext], zoned_nat(tz), ...
+            {}, {sprintf('input: listed EDF not found (%s)', missing_inputs{i})}, {})); %#ok<AGROW>
+    end
 
     case_tally = containers.Map('KeyType', 'char', 'ValueType', 'double');
     clean_status_tally = containers.Map('KeyType', 'char', 'ValueType', 'double');
@@ -109,13 +133,18 @@ function result = run_pipeline_edf(input_folder, cfg)
 
         file_cfg = cfg;
         file_cfg.edf.output_dir = dirs.txt;
+        n_before = [numel(seizure_event_parts), numel(seizure_summary_parts), numel(iid_event_parts), ...
+            numel(iid_summary_parts), numel(iid_burst_parts), numel(gap_parts), numel(qc_parts)];
 
         try
             [manifest, gaps_table, ~] = edf_import(file_path, file_cfg);
         catch ME
             log_error(log_file, files(f).name, '', 'edf_import', ME);
-            qc_parts{end+1} = build_qc_row(qc_info_minimal('', '', files(f).name, NaT, ...
+            % zoned NaT: an unzoned one cannot be stacked with the other rows
+            qc_parts{end+1} = build_qc_row(qc_info_minimal(cfg.edf.subject_id, '', files(f).name, zoned_nat(tz), ...
                 {}, {sprintf('edf_import: %s', ME.message)}, {})); %#ok<AGROW>
+            write_checkpoint(checkpoint_dir, f, files(f).name, n_before, seizure_event_parts, seizure_summary_parts, ...
+                iid_event_parts, iid_summary_parts, iid_burst_parts, gap_parts, qc_parts);
             continue;
         end
         gap_parts{end+1} = gaps_table; %#ok<AGROW>
@@ -155,9 +184,18 @@ function result = run_pipeline_edf(input_folder, cfg)
 
             if ~isempty(q)
                 try
-                    [~, txt_name, txt_ext] = fileparts(row.txt_file{1});
-                    candidate_names = {files(f).name, [txt_name txt_ext]};
-                    [case_spec, matched_idx] = resolve_case(candidate_names, region, cases_table, cfg);
+                    if isfield(cfg.cases, 'from_excel') && cfg.cases.from_excel
+                        [case_spec, case_note] = resolve_case_excel(manifest_attenuation(row), cfg);
+                        if ~isempty(case_note)
+                            warnings_list{end+1} = case_note; %#ok<AGROW>
+                            log_line(log_file, sprintf('  [%s] WARNING %s', region, case_note));
+                        end
+                        matched_idx = NaN;
+                    else
+                        [~, txt_name, txt_ext] = fileparts(row.txt_file{1});
+                        candidate_names = {files(f).name, [txt_name txt_ext]};
+                        [case_spec, matched_idx] = resolve_case(candidate_names, region, cases_table, cfg);
+                    end
                     if ~isnan(matched_idx)
                         row_matched(matched_idx) = true;
                     end
@@ -184,6 +222,11 @@ function result = run_pipeline_edf(input_folder, cfg)
                     log_line(log_file, sprintf('  [%s] clean_lfp: %s (case=%s)', region, clean_status, case_spec.case_applied));
                     if clean_stats.auto_switch
                         warnings_list{end+1} = clean_stats.switched_reason; %#ok<AGROW>
+                    end
+                    gain_note = gain_warning(case_spec, clean_data);
+                    if ~isempty(gain_note)
+                        warnings_list{end+1} = gain_note; %#ok<AGROW>
+                        log_line(log_file, sprintf('  [%s] WARNING %s', region, gain_note));
                     end
                 catch ME
                     log_error(log_file, files(f).name, region, 'clean_lfp', ME);
@@ -260,6 +303,8 @@ function result = run_pipeline_edf(input_folder, cfg)
             end
         end
         clear channel_ctx outs
+        write_checkpoint(checkpoint_dir, f, files(f).name, n_before, seizure_event_parts, seizure_summary_parts, ...
+            iid_event_parts, iid_summary_parts, iid_burst_parts, gap_parts, qc_parts);
     end
 
     for i = 1:numel(row_matched)
@@ -270,11 +315,12 @@ function result = run_pipeline_edf(input_folder, cfg)
         end
     end
 
-    tz = cfg.general.timezone;
+    % Consolidation: robust_vertcat never throws (see header); the review
+    % sheet and the writer are guarded so whatever can be written is.
     events_on = band_on && any_robust;  % event columns only if the run had robust channels (legacy-only: just ll_status)
     if bilateral_on
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table_bilateral(tz), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table_bilateral(tz), tz, 'seizures_summary');
     elseif band_on
         ev_kinds = {'ll_status'};
         if events_on
@@ -284,31 +330,44 @@ function result = run_pipeline_edf(input_folder, cfg)
         for k = ev_kinds
             seizure_event_parts = cellfun(@(t) add_event_columns(t, k{1}), seizure_event_parts, 'UniformOutput', false);
         end
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table_events(tz, events_on));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events_on));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table_events(tz, events_on), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table_events(tz, events_on), tz, 'seizures_summary');
     else
-        seizures_events = vertcat_or_empty(seizure_event_parts, @() empty_seizure_events_table(tz));
-        seizures_summary = vertcat_or_empty(seizure_summary_parts, @() empty_seizure_summary_table(tz));
+        seizures_events = robust_vertcat(seizure_event_parts, @() empty_seizure_events_table(tz), tz, 'seizures_events');
+        seizures_summary = robust_vertcat(seizure_summary_parts, @() empty_seizure_summary_table(tz), tz, 'seizures_summary');
     end
-    iid_events = vertcat_or_empty(iid_event_parts, @() empty_iid_events_table(tz));
-    iid_summary = vertcat_or_empty(iid_summary_parts, @() empty_iid_summary_table(tz));
-    iid_bursts = vertcat_or_empty(iid_burst_parts, @() empty_iid_bursts_table(tz));
-    gaps_summary = vertcat_or_empty(gap_parts, @() empty_gaps_table(tz));
-    qc_report = vertcat_or_empty(qc_parts, @() empty_qc_table(tz));
+    iid_events = robust_vertcat(iid_event_parts, @() empty_iid_events_table(tz), tz, 'iid_events');
+    iid_summary = robust_vertcat(iid_summary_parts, @() empty_iid_summary_table(tz), tz, 'iid_summary');
+    iid_bursts = robust_vertcat(iid_burst_parts, @() empty_iid_bursts_table(tz), tz, 'iid_bursts');
+    gaps_summary = robust_vertcat(gap_parts, @() empty_gaps_table(tz), tz, 'gaps_summary');
+    qc_report = robust_vertcat(qc_parts, @() empty_qc_table(tz), tz, 'qc_report');
 
-    if bilateral_on
-        natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
-    elseif events_on
-        natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
-    else
-        natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+    try
+        if bilateral_on
+            natus_review_sheet = build_natus_review_sheet_bilateral(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        elseif events_on
+            natus_review_sheet = build_natus_review_sheet_events(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        else
+            natus_review_sheet = build_natus_review_sheet(seizures_events, iid_bursts, gaps_summary, file_subject_map, tz);
+        end
+    catch ME
+        log_line(log_file, sprintf('ERROR building natus_review_sheet (written empty, every other summary unaffected): %s', ME.message));
+        natus_review_sheet = table(cell(0, 1), 'VariableNames', {'natus_review_sheet_failed'});
     end
 
-    paths = write_all_summaries(dirs.summaries, seizures_events, seizures_summary, ...
-        iid_events, iid_summary, iid_bursts, gaps_summary, qc_report, natus_review_sheet);
+    try
+        paths = write_all_summaries(dirs.summaries, seizures_events, seizures_summary, ...
+            iid_events, iid_summary, iid_bursts, gaps_summary, qc_report, natus_review_sheet);
+        if isfolder(checkpoint_dir)
+            rmdir(checkpoint_dir, 's');
+        end
+    catch ME
+        log_line(log_file, sprintf('ERROR writing 05_summaries: %s -- per-file results kept in %s', ME.message, checkpoint_dir));
+        paths = struct();
+    end
 
     log_line(log_file, sprintf('DONE: %d seizure(s), %d IID complex(es), %d burst(s), %d error(s) across %d file(s)', ...
-        height(seizures_events), height(iid_events), height(iid_bursts), sum(qc_report.n_errors), numel(files)));
+        height(seizures_events), height(iid_events), height(iid_bursts), count_errors(qc_report), numel(files)));
     print_case_summary(case_tally, clean_status_tally, n_unusable, n_suggested_mismatch);
     fclose(log_file);
 
@@ -769,6 +828,100 @@ function files_out = discover_edf_files(folder)
     files_out = files(ia);
 end
 
+function [files, missing, desc] = resolve_edf_inputs(input)
+% A folder -> every .edf in it. A cell array (or a single path ending in
+% .edf) -> exactly those files; the ones that do not exist are returned in
+% `missing` so the caller reports them instead of stopping.
+    missing = {};
+    if (ischar(input) || (isstring(input) && isscalar(input))) && isfolder(input)
+        desc = char(input);
+        files = discover_edf_files(desc);
+        return;
+    end
+    if ischar(input) || isstring(input)
+        input = cellstr(input);
+        [~, ~, ext] = fileparts(input{1});
+        if isscalar(input) && ~strcmpi(ext, '.edf')
+            error('run_pipeline_edf:BadInput', 'Not a folder: %s', input{1});
+        end
+    end
+    if ~iscell(input)
+        error('run_pipeline_edf:BadInput', 'input must be a folder or a cell array of .edf paths.');
+    end
+    desc = sprintf('a list of %d EDF file(s)', numel(input));
+    files = [];
+    for i = 1:numel(input)
+        d = dir(char(input{i}));
+        if isempty(d) || d(1).isdir
+            missing{end+1} = char(input{i}); %#ok<AGROW>
+        else
+            files = [files; d(1)]; %#ok<AGROW>
+        end
+    end
+end
+
+function t = zoned_nat(tz)
+    t = NaT;
+    t.TimeZone = tz;
+end
+
+function v = manifest_attenuation(row)
+% The Excel's Attenuation cell edf_import.m put in the manifest ('' when
+% the channel mode is not 'log').
+    if ismember('attenuation', row.Properties.VariableNames)
+        v = char(row.attenuation{1});
+    else
+        v = '';
+    end
+end
+
+function note = gain_warning(case_spec, clean_data)
+% qc_report warning when a gain case could not apply its automatic gain,
+% or used the all-regions fallback reference (precondition_lfp.m).
+    note = '';
+    if ~strcmp(case_spec.gain_mode, 'auto') || ~isfield(clean_data, 'meta')
+        return;
+    end
+    m = clean_data.meta;
+    if strcmp(meta_char(m, 'reference_source'), 'none') || isnan(meta_num(m, 'gain_estimate_raw'))
+        note = 'gain NOT applied (no reference amplitude, or no measurable amplitude in this channel)';
+    elseif strcmp(meta_char(m, 'reference_source'), 'fallback')
+        note = 'gain reference taken from all regions pooled (no non-attenuated channel of this region in the run)';
+    end
+end
+
+function write_checkpoint(checkpoint_dir, f, source_name, n_before, varargin)
+% Saves the result rows THIS file added (one .mat per file, so the cost
+% does not grow with the run). Recovery only: deleted once 05_summaries/
+% is written.
+    names = {'seizure_events', 'seizure_summary', 'iid_events', 'iid_summary', 'iid_bursts', 'gaps', 'qc'};
+    cp = struct('file_index', f, 'source_file', source_name);
+    for k = 1:numel(names)
+        parts = varargin{k};
+        cp.(names{k}) = parts(n_before(k) + 1:end);
+    end
+    try
+        if ~isfolder(checkpoint_dir)
+            mkdir(checkpoint_dir);
+        end
+        save(fullfile(checkpoint_dir, sprintf('file_%03d.mat', f)), '-struct', 'cp');
+    catch ME
+        warning('run_pipeline_edf:CheckpointFailed', 'Could not save the checkpoint of %s: %s', source_name, ME.message);
+    end
+end
+
+function n = count_errors(qc_report)
+    try
+        v = qc_report.n_errors;
+        if iscell(v)
+            v = str2double(v);
+        end
+        n = sum(v(~isnan(v)));
+    catch
+        n = NaN;
+    end
+end
+
 %% ======================================================================
 function [clean_data, clean_stats, status, notch_info] = run_clean_stage(raw_data, q, case_spec, cfg, clean_dir)
 % Case-aware selective reprocessing: precondition_lfp.m is cheap (gain is
@@ -1100,7 +1253,7 @@ function info = qc_info_blank()
         'line_ratio_db', NaN, 'line_ratio_p95_db', NaN, 'line_ratio_max_db', NaN, 'pct_time_line_high', NaN, ...
         'notch_applied', false, 'quantization_step_uV', NaN, 'snr_quantization_db', NaN, 'adc_codes_span', NaN, ...
         'pct_clipped', NaN, 'flat_fraction', NaN, 'notch_blocks_skipped', NaN, ...
-        'seizure_threshold_mode', '', 'iid_threshold_mode', '');
+        'seizure_threshold_mode', '', 'iid_threshold_mode', '', 'excel_attenuation', '');
 end
 
 function info = qc_info_full(row, session_start, stages, errors, warnings_list, clean_data, clean_stats, seizure_results, q, case_spec, notch_info, cfg)
@@ -1115,6 +1268,7 @@ function info = qc_info_full(row, session_start, stages, errors, warnings_list, 
     info.n_warnings = numel(warnings_list);
     info.warning_messages = strjoin(warnings_list, '; ');
     info.nan_pct = 100 * (1 - row.n_valid_samples / row.n_samples);
+    info.excel_attenuation = manifest_attenuation(row);
 
     if ~isempty(clean_stats)
         info.outlier_pct = clean_stats.outlier_pct;
@@ -1191,7 +1345,7 @@ function T = build_qc_row(info)
         info.line_ratio_db, info.line_ratio_p95_db, info.line_ratio_max_db, info.pct_time_line_high, ...
         info.notch_applied, info.quantization_step_uV, info.snr_quantization_db, info.adc_codes_span, ...
         info.pct_clipped, info.flat_fraction, info.notch_blocks_skipped, ...
-        {info.seizure_threshold_mode}, {info.iid_threshold_mode}, ...
+        {info.seizure_threshold_mode}, {info.iid_threshold_mode}, {info.excel_attenuation}, ...
         'VariableNames', qc_column_names());
 end
 
