@@ -5,11 +5,12 @@
 #   .\run_all_subjects.ps1 -Subjects 004-s,005-s             # only these animals
 #   .\run_all_subjects.ps1 -OutputRoot D:\out -FilesCsv edf_list.csv
 #
-# Default OutputRoot: <DataRoot>\pipeline_output_campaign_<yyyyMMdd>
+# Default DataRoot: edfDir of run_all_subjects.m (the EDF folder).
+# Default OutputRoot: <parent folder of this repo>\pipeline_output_campaign_<yyyyMMdd>
 # (pipeline_output_campaign_preliminar_<yyyyMMdd> with -FilesCsv).
 # Output is also saved to <OutputRoot>\run_all_subjects_<timestamp>.log
 param(
-    [string]$DataRoot   = (Split-Path -Parent $PSScriptRoot),
+    [string]$DataRoot   = '',   # '' -> edfDir of run_all_subjects.m
     [string]$OutputRoot = '',
     [string[]]$Subjects = @(),
     [string]$CasesFile  = '',
@@ -18,12 +19,12 @@ param(
     [string]$Matlab     = 'C:\Program Files\MATLAB\R2025b\bin\matlab.exe'
 )
 
-if (-not $RecordingLog) { $RecordingLog = Join-Path $DataRoot 'EEG_recording_log.xlsx' }
+if (-not $RecordingLog -and $DataRoot) { $RecordingLog = Join-Path $DataRoot 'EEG_recording_log.xlsx' }   # '' -> <edfDir>\EEG_recording_log.xlsx (run_all_subjects.m)
 if ($FilesCsv) { $FilesCsv = (Resolve-Path $FilesCsv).Path }
 if (-not $OutputRoot) {
     $stamp = Get-Date -Format 'yyyyMMdd'
-    if ($FilesCsv) { $OutputRoot = Join-Path $DataRoot "pipeline_output_campaign_preliminar_$stamp" }
-    else           { $OutputRoot = Join-Path $DataRoot "pipeline_output_campaign_$stamp" }
+    if ($FilesCsv) { $OutputRoot = Join-Path (Split-Path -Parent $PSScriptRoot) "pipeline_output_campaign_preliminar_$stamp" }
+    else           { $OutputRoot = Join-Path (Split-Path -Parent $PSScriptRoot) "pipeline_output_campaign_$stamp" }
 }
 New-Item -ItemType Directory -Force $OutputRoot | Out-Null
 $log = Join-Path $OutputRoot ("run_all_subjects_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))

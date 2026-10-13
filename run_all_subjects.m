@@ -9,11 +9,11 @@ function run_all_subjects(data_root, output_root, subjects, cases_file, recordin
 %   run_all_subjects(data_root, output_root, {}, '', '', 'edf_list.csv')   % only the listed EDFs
 %
 % data_root     folder holding one subfolder per animal containing .EDF
-%               files. Default: parent folder of this repo.
+%               files. Default: edfDir (set below).
 % output_root   <output_root>/<animal>/... per animal,
 %               <output_root>/merged/05_summaries for the combined CSVs,
 %               <output_root>/reference_*.csv for the gain reference.
-%               Default: <data_root>/pipeline_output_campaign_<yyyyMMdd>
+%               Default: <parent folder of this repo>/pipeline_output_campaign_<yyyyMMdd>
 %               (pipeline_output_campaign_preliminar_<yyyyMMdd> with a
 %               files_csv).
 % subjects      cell array of animal folder names to process; {} = all.
@@ -46,13 +46,16 @@ function run_all_subjects(data_root, output_root, subjects, cases_file, recordin
     addpath(fullfile(repo_root, 'src'));
     addpath(fullfile(repo_root, 'src', 'utils'));
 
-    if nargin < 1 || isempty(data_root),   data_root = fileparts(repo_root); end
+    % EDF folder (one subfolder per animal). The code no longer lives next to the EDFs.
+    edfDir = '\\iws\epic\users\camila.morel\1-DATA\Video_ECoG\2026\natus\EDF export\decimated';
+    if nargin < 1 || isempty(data_root),   data_root = edfDir; end
+    assert(isfolder(data_root), 'No se encuentra la carpeta de EDF: %s', data_root);
     if nargin < 6, files_csv = ''; end
     if nargin < 2 || isempty(output_root)
         if isempty(files_csv)
-            output_root = fullfile(data_root, ['pipeline_output_campaign_' datestr(now, 'yyyymmdd')]); %#ok<TNOW1,DATST>
+            output_root = fullfile(fileparts(repo_root), ['pipeline_output_campaign_' datestr(now, 'yyyymmdd')]); %#ok<TNOW1,DATST>
         else
-            output_root = fullfile(data_root, ['pipeline_output_campaign_preliminar_' datestr(now, 'yyyymmdd')]); %#ok<TNOW1,DATST>
+            output_root = fullfile(fileparts(repo_root), ['pipeline_output_campaign_preliminar_' datestr(now, 'yyyymmdd')]); %#ok<TNOW1,DATST>
         end
     end
     if nargin < 3, subjects = {}; end
