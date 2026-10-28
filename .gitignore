@@ -1,6 +1,8 @@
 # Raw/test EDF data -- too large for git (GitHub rejects files > 100 MB).
 # Keep locally; share separately (e.g. Git LFS, external storage) if versioning is needed.
 097-s/
+005-s/*
+!005-s/ground_truth.csv
 *.edf
 *.EDF
 
@@ -23,3 +25,6 @@ pipeline_output/
 
 # Local Claude Code tooling state, not part of the project
 .claude/
+
+# Windows thumbnail cache
+Thumbs.db

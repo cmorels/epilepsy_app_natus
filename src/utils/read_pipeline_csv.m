@@ -20,19 +20,43 @@ function T = read_pipeline_csv(csv_path, kind, tz)
         tz = 'Europe/Paris';
     end
 
+    opts = detectImportOptions(csv_path);
+
     template = empty_table_for(kind, tz);
+    % A reconciled run (cfg.bilateral.rescue_mode ~= 'off', see
+    % bilateral_reconcile.m) appends bilateral_columns(kind) to the seizure
+    % CSVs; read them with their types when present, never drop them.
+    % Each extended schema is recognised by a column only it has (the two
+    % share some names, e.g. fragmented / ref_start_s).
+    bilateral_marker = struct('seizures_events', 'detection_status', 'seizures_summary', 'n_seizures_reported');
+    events_marker = struct('seizures_events', 'event_id', 'seizures_summary', 'n_events_crisis');
+    if isfield(bilateral_marker, kind) && ismember(bilateral_marker.(kind), opts.VariableNames)
+        template = add_bilateral_columns(template, kind);
+    end
+    % Same for the review band / event categories (event_columns.m).
+    if strcmp(kind, 'seizures_events') && ismember('ll_status', opts.VariableNames)
+        template = add_event_columns(template, 'll_status');
+    end
+    if isfield(events_marker, kind) && ismember(events_marker.(kind), opts.VariableNames)
+        template = add_event_columns(template, kind);
+    end
     names = template.Properties.VariableNames;
 
-    opts = detectImportOptions(csv_path);
     missing = setdiff(names, opts.VariableNames);
-    if ~isempty(missing)
+    optional_defaults = optional_columns_for(kind);
+    required_missing = setdiff(missing, keys(optional_defaults));
+    if ~isempty(required_missing)
         error('read_pipeline_csv:MissingColumn', ...
-            'Expected column(s) not found in %s: %s', csv_path, strjoin(missing, ', '));
+            'Expected column(s) not found in %s: %s', csv_path, strjoin(required_missing, ', '));
     end
+    % `missing` (a strict subset with a registered default, if non-empty here) covers
+    % files written before a schema extension (e.g. seizures_events.csv before the
+    % seizure_mode/confidence columns) -- see optional_columns_for below.
+    present_names = setdiff(names, missing, 'stable');
 
     text_cols = {};
-    for i = 1:numel(names)
-        name = names{i};
+    for i = 1:numel(present_names)
+        name = present_names{i};
         col = template.(name);
         if iscell(col) || isdatetime(col)
             opts = setvartype(opts, name, 'char');  % read as text; convert explicitly below (sidesteps readtable's 0-row datetime bug)
@@ -44,13 +68,21 @@ function T = read_pipeline_csv(csv_path, kind, tz)
         end
     end
 
+    % Only the schema's columns are read; any other column (e.g. the
+    % start_datetime / end_datetime text columns write_all_summaries.m adds
+    % to seizures_events) is ignored, never type-guessed.
+    opts.SelectedVariableNames = present_names;
     Traw = readtable(csv_path, opts);
-    Traw = Traw(:, names);
-
+    Traw = Traw(:, present_names);
     n = height(Traw);
+
     cols = cell(1, numel(names));
     for i = 1:numel(names)
         name = names{i};
+        if ismember(name, missing)
+            cols{i} = repmat(optional_defaults(name), n, 1);
+            continue;
+        end
         if isdatetime(template.(name))
             if n == 0
                 cols{i} = datetime.empty(0, 1);
@@ -64,6 +96,27 @@ function T = read_pipeline_csv(csv_path, kind, tz)
     end
 
     T = table(cols{:}, 'VariableNames', names);
+end
+
+%% ======================================================================
+function m = optional_columns_for(kind)
+% Columns a schema has grown since some existing summary CSVs were
+% written, with the default value to backfill when reading an
+% older-shaped file (never an error -- see the missing-column check
+% above). Every file predating a given column was necessarily written
+% by whatever this default represents (e.g. every seizures_events.csv
+% written before seizure_mode existed came only from the legacy branch).
+    m = containers.Map('KeyType', 'char', 'ValueType', 'any');
+    if strcmp(kind, 'seizures_events')
+        m('seizure_mode') = {'legacy'};
+        m('over_max_duration') = false;
+        m('ll_ratio') = NaN;
+        m('peak_energy_ratio') = NaN;
+        m('hf_ratio_db') = NaN;
+        m('envelope_cv') = NaN;
+    elseif strcmp(kind, 'qc')
+        m('excel_attenuation') = {''};  % qc_report.csv written before the Excel-driven case existed
+    end
 end
 
 function T = empty_table_for(kind, tz)

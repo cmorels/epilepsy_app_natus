@@ -8,6 +8,70 @@ original Intan-era scripts at the repo root (`complete_pipeline_seizures.m`,
 kept untouched as reference. See `KNOWN_ISSUES.md` for the methodological
 caveats that were deliberately carried over unchanged.
 
+## Running the EDF campaign
+
+The campaign configuration lives in `src/campaign_config.m` (decided
+2026-10-03); `pipeline_config.m` defaults are untouched, so any other run
+stays reproducible. `run_all_subjects.m` / `run_all_subjects.ps1` always
+use the campaign configuration:
+
+| What | Campaign setting |
+|---|---|
+| Seizure detector | **robust branch on every channel** (`detect_seizures_robust.m`); the legacy detector is not used |
+| Cross-hemisphere | **bilateral reconciliation ON** (`rescue_mode = 'rescue_and_impute'`), review band OFF (single `ll_ratio` cut at 1.75) -- the two cannot be combined |
+| IID exclusion | reconciled seizures (accepted, rescued and imputed) are excluded from IID in **both** channels |
+| 50 Hz notch | **every channel**, whatever its measured line noise; stopband 49-51 Hz (`notch_halfwidth_hz = 1`), no harmonics. Applied in `clean_lfp.m`, so seizure **and** IID detection work on the notched signal |
+| Gain | from the Excel (`EEG_recording_log.xlsx`), column **Attenuation**: `severe`, `mild`, `unsure, perhaps mild` -> attenuated -> notch + automatic gain; `no`, `none`, empty -> notch only. Any other value -> attenuated, with a warning in `qc_report.csv`. Applies to both channels of the animal in that EDF |
+| Gain reference | median `sigma_band_uV` of the **non-attenuated channels of the same run**, per region (HPCr / HPCl). Region without one -> all regions pooled -> none: no gain, warning. The run never stops for this |
+| Animal ID | the folder name, **exactly** (`005-s` and `005` are different animals); matched exactly against the Excel's Animal ID |
+
+```powershell
+# every animal folder whose name is an Animal ID in the Excel
+.\run_all_subjects.ps1
+# only the EDFs listed in a CSV with columns animal_id, edf_file
+.\run_all_subjects.ps1 -FilesCsv edf_list.csv
+```
+```matlab
+run_all_subjects(data_root, output_root, {}, '', '', 'edf_list.csv')
+```
+
+If Windows refuses to run the `.ps1` from the network share ("not
+digitally signed"), call MATLAB directly with the line the script prints
+(`matlab -batch "cd('<repo>'); run_all_subjects(...)"`), or start it with
+`powershell -ExecutionPolicy Bypass -File run_all_subjects.ps1 ...`.
+
+`edf_list.csv` example (the EDF name with or without `.EDF`; a listed EDF
+that does not exist is skipped and reported in `skipped_inputs.csv`):
+
+```
+animal_id,edf_file
+005-s,20260331~ TRAP_aa803181-9619-4478-8a6b-b25ca213c299
+048-s,20260608~ TRAP_c0b1aaca-9721-4933-a285-e329565b9b91.EDF
+```
+
+Steps: (1) list the EDFs; (2) `compute_run_reference.m` imports every
+EDF once and measures the gain reference (`reference_channels.csv`,
+`reference_per_region.csv`); (3) `run_pipeline_edf.m` per animal, reusing
+that import (`cfg.edf.reuse_import`); (4) `merge_pipeline_runs.m` into
+`<output_root>/merged/05_summaries/`. Default output root:
+`<data_root>/pipeline_output_campaign_<yyyyMMdd>`
+(`..._preliminar_<yyyyMMdd>` with an EDF list).
+
+Per channel, `qc_report.csv` records what was applied: `case_applied`
+(`excel_clean` / `excel_attenuated`), `case_source = excel`,
+`excel_attenuation` (the Excel cell as written), `gain_applied`,
+`reference_used`, `reference_source` (`config_map` = this region,
+`fallback` = all regions pooled, `none` = no gain), `notch_applied`.
+
+**The output never collapses on one bad input.** An EDF that is missing
+from the Excel, fails to import or fails in any stage gets its error in
+`qc_report.csv` and the run continues. Each EDF's results are saved to
+`logs/checkpoints/` as soon as it finishes; the final tables are stacked
+with `utils/robust_vertcat.m` (one TimeZone stamped on every datetime
+column, text fallback if a column type still clashes), so the failure that
+used to throw away a whole subject (an unzoned NaT in the qc row of a
+failed EDF, 001-s on 23/09) cannot happen again.
+
 ## Flow
 
 ```
@@ -88,6 +152,21 @@ single file or channel failing (logged, not fatal -- see `qc_report.csv`).
   invented anatomy). Switch to `cfg.edf.channels.mode = 'map'` and edit
   `cfg.edf.channels.map` with the real label -> region names once you've
   confirmed the montage for a given study.
+- **Per-file mapping from the recording Excel.** `cfg.edf.channels.mode = 'log'`
+  reads `cfg.edf.channels.log_file` (`EEG_recording_log.xlsx`: `Filename`,
+  `Animal ID`, `Port`, `HPCr_channel`, `HPCl_channel`, optional
+  `Attenuation`) and, for each EDF, picks the row matching
+  (`cfg.edf.subject_id`, EDF filename) **exactly** -- never the filename
+  alone, since animals recorded together share one filename, and never
+  ignoring a suffix (`005-s` does not match `005`). Port +
+  channel gives the EDF label (`A1` + `C2` -> `EEG A1C2`, or `A1C2` in older
+  exports); regions are named `cfg.edf.channels.log_regions` (`HPCr`, `HPCl`)
+  regardless of port, so runs stay comparable when an animal changes port.
+  An EDF with no Excel row (e.g. its file name in the Excel differs from
+  the real one), or whose listed channels aren't in the file, fails
+  `edf_import` and is reported in `qc_report.csv`; the rest of the run is
+  unaffected. `run_all_subjects.m` / `run_all_subjects.ps1` run the
+  campaign this way (see **Running the EDF campaign**).
 
 ### Testing status
 
@@ -104,16 +183,39 @@ EDF+D file processing cleanly, with its gaps CSV matching
 real data -- run it against a genuinely gapped EDF before trusting that
 path in production.
 
+Campaign configuration, smoke test of 2026-10-03 (`005-s 20260327~
+mTor_637ccc11`, Excel `severe`; `048-s 20260608~ TRAP_c0b1aaca`, Excel
+empty; plus `001-s 20260406~ TRAP_d9f6c452`, whose name is not in the
+Excel, and one listed file that does not exist): every stage ran, 0
+errors on the real channels; the missing-from-Excel EDF produced one
+qc_report row and did not affect the others; the missing file went to
+`skipped_inputs.csv`; the merge completed. Reference from 048-s (HPCr
+33.0 uV, HPCl 36.9 uV) -> gains 9.83 / 4.78 on 005-s, confirmed in the
+clean signal (30-40 Hz power of clean / gain equals raw within 0.6 dB).
+Notch alone on the raw signal, median PSD: -54 to -67 dB at 50 Hz, about
+-3 dB at 48.5-49 / 51-51.5 Hz, -0.3 dB at 47-48 / 52-53 Hz, 0.00 dB at
+5-45 Hz. Reconciliation on 005-s: 8 events, HPCl 9 accepted + 1 rescued +
+3 imputed; IID exclusion zones = every reconciled row (HPCl 13). A second
+pass reused the import instead of re-reading the EDF.
+
 ### Resumability (scoped)
 
 `cfg.general.overwrite = false` makes every stage refuse to clobber an
 existing output file. `run_pipeline_edf.m` additionally *skips recomputing*
 stage 2 (`clean_lfp`) when its output already exists, because that's the
 stage where avoiding recomputation is worth it and its output filename is
-a trivial, low-risk one-line rule (`<raw_basename>_clean.txt`). Stages 1
-(`edf_import`, the expensive `edfread` call), 3, and 4 still run every
-time; they just won't overwrite what's already on disk. This is a
-deliberate scope limitation, not a bug.
+a trivial, low-risk one-line rule (`<raw_basename>_clean.txt`). Stages 3
+and 4 still run every time; they just won't overwrite what's already on
+disk. This is a deliberate scope limitation, not a bug.
+
+Stage 1 (`edf_import`, the expensive `edfread` call) is skipped only with
+`cfg.edf.reuse_import = true` (on in the campaign): a complete import of
+the same EDF for the same animal is recorded in
+`01_txt/_import_cache/` and reused if the EDF (size, date), the channels,
+the import parameters and every txt it wrote are unchanged. Without a
+valid record the EDF is imported in full and its txt rewritten, so a txt
+left half-written by an interrupted run is never reused. The Excel's
+Attenuation value is always re-read, never taken from the record.
 
 ## Header field dictionary
 
@@ -159,7 +261,17 @@ applicable, `source_file`) and both relative (`_s`) and absolute (`_abs`)
 times where a time is meaningful.
 
 **seizures_events.csv** -- one row per seizure
-`subject_id, region, session_start, source_file, seizure_id, start_s, end_s, duration_s, start_abs, end_abs, block_id, adjacent_to_gap`
+`subject_id, region, session_start, source_file, seizure_id, start_datetime, end_datetime, start_s, end_s, duration_s, start_abs, end_abs, block_id, adjacent_to_gap`
+(+ `seizure_mode` and the robust confidence columns; + the reconciliation
+columns when it is on, see **Bilateral reconciliation**.)
+`start_datetime` / `end_datetime`: the seizure's start / end as local clock
+time, text `dd/MM/yyyy HH:mm:ss` (e.g. `29/03/2026 17:35:45`), to look it up
+in Natus -- the same instant as `start_abs` / `end_abs`, seconds truncated.
+Added when the CSV and the `seizures_events` sheet of
+`pipeline_summary.xlsx` are written (`utils/add_seizure_datetime_columns.m`),
+so they are in the files, not in the in-memory `result.seizures_events`;
+`read_pipeline_csv.m` ignores them. Outputs written before 2026-10-04 get
+them with `tools/add_datetime_columns_to_seizures_events.m`.
 
 **seizures_summary.csv** -- one row per file/channel
 `subject_id, region, session_start, source_file, total_duration_min, valid_duration_min, n_gaps, gap_duration_min, n_seizures, total_seizure_time_s, pct_time_in_seizure, mean_duration_s, min_duration_s, max_duration_s, median_energy, threshold_value, pct_above_thr, n_segments, n_rejected, bandpass_low, bandpass_high, power_exponent, window_s, median_factor, min_seizure_duration`
@@ -176,8 +288,9 @@ times where a time is meaningful.
 **gaps_summary.csv** -- every gap, every file, consolidated
 `gap_id, start_s, end_s, duration_s, start_abs, end_abs, prev_record_idx, next_record_idx, source_file`
 
-**qc_report.csv** -- one row per file/channel
-`subject_id, region, source_file, session_start, stages_completed, n_errors, error_messages, n_blocks_rejected_short, outlier_pct, nan_pct, n_warnings, warning_messages`
+**qc_report.csv** -- one row per file/channel (and one per EDF that failed to import or was not found)
+`subject_id, region, source_file, session_start, stages_completed, n_errors, error_messages, n_blocks_rejected_short, outlier_pct, nan_pct, n_warnings, warning_messages, case_applied, case_source, suggested_case, quality_class, sigma_band_uV, reference_used, reference_source, gain_estimate_raw, gain_applied, gain_source, sensitivity_equivalent_uV_per_mm, line_ratio_db, line_ratio_p95_db, line_ratio_max_db, pct_time_line_high, notch_applied, quantization_step_uV, snr_quantization_db, adc_codes_span, pct_clipped, flat_fraction, notch_blocks_skipped, seizure_threshold_mode, iid_threshold_mode, excel_attenuation`
+(`excel_attenuation` is the Excel's Attenuation cell; read_pipeline_csv.m fills it with '' for older files.)
 
 **pipeline_summary.xlsx** -- the same seven tables above (everything
 except `natus_review_sheet`) as sheets named `seizures_events`,
@@ -217,13 +330,15 @@ name the EDF files so `cfg.edf.subject_id = ''` can derive a correct,
 distinct ID per file from each filename, or -- the more reliable option --
 run `run_pipeline_edf` once per subject (its own input folder, its own
 `cfg.edf.subject_id`, its own `cfg.paths.output_root`) and combine the
-results afterward with `merge_pipeline_runs.m`:
+results afterward with `merge_pipeline_runs.m` (`run_all_subjects.m` does
+exactly this). The ID is used exactly as given: `097-s` and `097` are
+different animals.
 
 ```matlab
-r1 = run_pipeline_edf('data/mouse_097', set_subject(pipeline_config(), '097', 'out/097'));
-r2 = run_pipeline_edf('data/mouse_098', set_subject(pipeline_config(), '098', 'out/098'));
+r1 = run_pipeline_edf('097-s', set_subject(campaign_config(), '097-s', 'out/097-s'));
+r2 = run_pipeline_edf('109-s', set_subject(campaign_config(), '109-s', 'out/109-s'));
 
-merged = merge_pipeline_runs({'out/097', 'out/098'}, 'out/merged');
+merged = merge_pipeline_runs({'out/097-s', 'out/109-s'}, 'out/merged');
 merged.seizures_events           % both subjects, correctly identified
 merged.paths.natus_review_sheet  % one combined review sheet, chronological
 
@@ -238,19 +353,281 @@ handling: `session_start` (from the EDF's own header) and the output
 filenames already differentiate sessions, so they can all go through one
 `run_pipeline_edf` call with one fixed `subject_id`.
 
+## Case system (sistema de casos)
+
+A **case** is the per-channel processing profile: whether gain is
+applied, whether the 50 Hz notch is applied, and which seizure detector
+runs. Profiles live in `cfg.cases.profiles`:
+
+| case | gain | notch | detector |
+|---|---|---|---|
+| `normal` (pipeline_config default) | off | off | legacy |
+| `attenuated` | auto | off | robust |
+| `line` | off | on | robust |
+| `both` | auto | on | robust |
+| `excel_clean` (campaign) | off | on | robust |
+| `excel_attenuated` (campaign) | auto | on | robust |
+
+How a channel gets its case: with `cfg.cases.from_excel = true` (campaign)
+from the Excel's Attenuation column (`utils/resolve_case_excel.m`);
+otherwise, by priority, explicit `gain`/`notch` values on its row of a
+cases CSV (`cfg.cases.file`, `load_cases.m`), that row's `case`,
+`cfg.cases.force`, `cfg.cases.default` (`resolve_case.m`).
+`make_cases_template.m` writes a cases CSV with a `suggested_case` from
+`signal_quality.m`'s measurements, never applied by itself.
+
+`signal_quality.m` always runs on the raw signal and only measures:
+`sigma_band_uV` (background amplitude, 15-70 Hz without 48-52 Hz, median
+over 4 s windows), `snr_quantization_db`, line-noise ratios, clipping,
+flat fraction. Only `precondition_lfp.m` (gain = reference /
+`sigma_band_uV`, dead band 1/1.5-1.5 -> 1, clamp 50) and `clean_lfp.m`
+(outliers, then notch) act, and only as the case says. The gain mostly
+changes outlier cleaning and IID (absolute thresholds); the seizure
+detectors use relative thresholds.
+
+## Two seizure branches (dos ramas)
+
+- **legacy** -- `detect_seizures.m`, unmodified port: Hilbert envelope^4
+  energy, threshold `median x 10`, minimum duration 15 s applied before
+  merging.
+- **robust** -- `detect_seizures_robust.m`: same energy, then merge
+  crossings <= 2 s apart, then minimum 10 s, maximum 60 s (longer events
+  kept and flagged `over_max_duration`), then line-length ratio filter
+  (single cut 1.75, or the review band below). Calibrated on animal 005
+  only (see KNOWN_ISSUES.md).
+
+The branch is chosen per channel by its case (`seizure_mode`). IID
+detection (`detect_iid.m`) is the same for both.
+
+## Not implemented (declared in the config only)
+
+- `cfg.seizure_robust.dual_report` -- nothing reads it; no
+  `seizures_events_alt.csv` is written.
+- `cfg.seizure.threshold_mode` other than `'median_factor'` and
+  `cfg.iid.threshold_mode` other than `'absolute'` (`log_mad`,
+  `moving_baseline`, `relative_mad`) -- only recorded in `qc_report.csv`.
+- `evaluate_detections.m` does not understand reconciled output: it counts
+  every row, so rescued/imputed rows (one per channel per event) would be
+  scored as detections. Use it only on unreconciled runs.
+
+## Review band and event categories (robust branch)
+
+### Review band
+
+`detect_seizures_robust.m`'s final filter is no longer a single cut at
+`ll_threshold`: each candidate gets an `ll_status`
+
+| `ll_status` | rule |
+|---|---|
+| `accepted` | `ll_ratio >= cfg.seizure_robust.ll_accept` (default 1.90) |
+| `in_band` | `ll_reject <= ll_ratio < ll_accept` -- kept, needs review |
+| `rejected` | `ll_ratio < cfg.seizure_robust.ll_reject` (default 1.60) |
+
+`.seizures` holds accepted + in_band rows, `.rejected_events` the rejected
+ones, `.candidates` all of them (`kept = ll_status ~= 'rejected'`). The
+line-length panel shows both lines with the band shaded. Legacy rows
+(`detect_seizures.m`, untouched) are always `ll_status = 'accepted'`: the
+band is a robust-branch concept only. **Backward compatibility:** set
+`ll_accept` or `ll_reject` to `[]`/NaN and the band is OFF -- every output
+is byte-identical to the binary pipeline; `ll_accept = ll_reject = 1.75`
+keeps the machinery on with a zero-width band and reproduces the binary
+classification.
+
+### Events and categories (`src/bilateral_events.m`)
+
+Robust detections of the same **(subject_id, session_start)** -- never the
+EDF file, which in log mode holds several animals -- are grouped across
+channels (overlap or gap < `cfg.seizure_robust.bilateral_tol_s`,
+transitive; two rows of the same channel are never merged, they share the
+`event_id` with `fragmented = true`). Each event gets a new **`event_id`**
+(1..K per animal + session, chronological, across all categories;
+`seizure_id` keeps its meaning and values as the channel-local index) and a
+category, counting channels:
+
+| category | rule |
+|---|---|
+| `Crisis` | accepted in >= 2 channels |
+| `Candidates` | accepted in exactly 1 channel |
+| `Candidates_in_band` | accepted in none, in_band in >= 1 |
+
+**Warning:** `Candidates_in_band` is material the binary pipeline
+discarded outright -- the band does not reorder what existed, it adds new
+material to review. It is never mixed into Crisis counts or rates.
+
+### Hemisphere mapping
+
+The hemisphere comes ONLY from the **region** name (`cfg.edf.channels.mode =
+'log'` names them `HPCr` = right, `HPCl` = left), through
+`cfg.output.hemisphere.left_regions` / `right_regions` (case-insensitive,
+trimmed; default `{'HPCl','HPCleft','HPC_L'}` / `{'HPCr','HPCright','HPC_R'}`).
+Never from the channel label (A5C2 / A7C1 ... change between recordings and
+animals) nor from processing order. A region in neither list is processed
+anyway (`hemisphere = 'unknown'`) and gets an extra joint-figure column on
+the right, with a log warning.
+
+### Figures
+
+```
+03_seizures/                       (per-channel .mat and panoramas stay here)
+  Crisis/              individual/   joint/
+  Candidates/          individual/   joint/
+  Candidates_in_band/  individual/   joint/
+individual: {subject}_{session}_event{ID:02d}_{region}.png/.fig   (every robust channel, detected or not)
+joint     : {subject}_{session}_event{ID:02d}_joint.png/.fig      (cfg.output.joint_figures)
+```
+
+Joint figure = 4 rows (voltage, band-passed, energy + threshold, line
+length + band) x N channels (left hemisphere, right, then unknown), same
+time window and linked x on every panel, **same y-limits across columns
+within each row** (energy row in log scale on every column if the maxima
+differ by > 100x), the event's reference window shaded per column by that
+channel's `ll_status` (or "sin detección"), column headers with region,
+hemisphere, channel, status, `ll_ratio` and distance to the nearest
+threshold, and the absolute start time in the title. Individual and joint
+figures are drawn by the same `utils/plot_trace_*.m` functions. Stale files
+of the same subject + session (event gone or re-categorized) are deleted;
+with `overwrite = false` existing correct files are not redrawn.
+
+### CSVs
+
+- `seizures_events.csv`: `ll_status` + `event_id, category, n_accepted,
+  n_in_band, n_channels_in_group, fragmented, hemisphere,
+  accepted_in_regions, ref_start_s, ref_end_s, figure_individual_path,
+  figure_joint_path` (a legacy-only run adds `ll_status` only).
+- `seizures_summary.csv`: pre-existing columns count **accepted rows only**;
+  appended `n_events_crisis, n_events_candidates, n_events_candidates_in_band,
+  n_accepted_this_channel, n_in_band_this_channel`, and time in seizure
+  twice: `*_crisis` (Crisis only) and `*_crisis_candidates` (Crisis +
+  Candidates). `Candidates_in_band` never enters a rate.
+- `natus_review_sheet.csv`: one row per (event_id, channel), grouped by
+  event, with `category, ll_status, ll_ratio, review_priority` (1 =
+  Candidates, 2 = Candidates_in_band, 3 = Crisis), `figure_joint_path`;
+  `natus_confirmed` is the reviewer's verdict column.
+- IID: in_band rows do not exclude time unless
+  `cfg.bilateral.exclude_in_band_from_iid = true` (default false).
+- `merge_pipeline_runs.m` propagates everything; the event key across runs
+  is (`subject_id`, `session_start`, `event_id`), never renumbered.
+
+The review band and `cfg.bilateral.rescue_mode ~= 'off'` cannot be combined
+yet (the run stops with a clear message); `bilateral_events.m` marks the
+extension point where rescued/imputed rows would plug in.
+
+## Bilateral reconciliation (reconciliación bilateral)
+
+Without it, each channel (hemisphere) is detected and numbered on its
+own: the same seizure can pass the filters in one hemisphere and fall just
+below them in the other (implant quality, attenuation, sitting near a
+threshold), so the two channels of one animal report different counts and
+"seizure 3" of one has nothing to do with "seizure 3" of the other.
+
+`src/bilateral_reconcile.m` runs after detection on every channel of one
+recording and before any seizure CSV, figure or IID exclusion zone:
+**a seizure is dropped only if every channel rejected it; if at least one
+channel accepted it, it is reported in all of them**, under one shared
+`seizure_id` (chronological, 1..K per animal + session).
+
+**It applies to the robust branch only** (channels whose case resolved to
+`seizure_mode = 'robust'`, i.e. `attenuated` / `line` / `both`). Legacy
+channels (`detect_seizures.m`, case `normal`) are never reconciled nor
+used as a reference: they keep their own figures and per-channel ids, and
+their rows are tagged `detection_status = 'not_reconciled'`.
+
+```matlab
+cfg.bilateral.rescue_mode = 'rescue_and_impute'; % RECOMMENDED. 'off' (default) | 'rescue' (diagnosis only)
+cfg.bilateral.match_tol_s = 5;                   % detections of different channels closer than this = one event
+cfg.bilateral.exclude_rescued_from_iid = true;   % IID exclusion zones also cover rescued/imputed rows
+cfg.bilateral.require_same_subject = true;       % never group different animals
+cfg.seizure_robust.ll_accept = [];               % REQUIRED: the review band (on by default in
+cfg.seizure_robust.ll_reject = [];               % pipeline_config.m) and reconciliation cannot be combined
+```
+
+**Reconciliation and the review band are mutually exclusive.** The band is
+ON in `pipeline_config.m` (`ll_accept = 1.90`, `ll_reject = 1.60`); with
+`rescue_mode ~= 'off'` it must be switched off (`ll_accept = ll_reject =
+[]`), otherwise `run_pipeline_edf.m` stops before processing anything.
+`campaign_config.m` does exactly this.
+
+Per event and channel, `detection_status` says how that row got there:
+
+| status | meaning | window |
+|---|---|---|
+| `accepted` | this channel's detector accepted it on its own merit | the detector's own |
+| `rescued` | this channel had it as a candidate rejected by the line-length filter (`kept=false` in `detect_seizures_robust.m`'s `.candidates`, `rejected_by='ll_ratio'`) -- the one with the highest `ll_ratio` if several; a candidate is rescued into one event at most | the candidate's OWN limits in this channel |
+| `imputed` | no rejected candidate of this channel overlapped the event | the event's reference window (union of the accepted rows), clipped to one valid block |
+| `imputed`, `rejected_by='detection_failed'` | this (robust) channel's clean or detection stage FAILED -- the failure is still reported, once per event; metrics are NaN (nothing to measure) and no figure is drawn; the channel counts in `n_channels_total` | the event's reference window |
+| `not_reconciled` | legacy channel, or reconciliation failed for that recording | the detector's own |
+
+`ll_ratio`, `peak_energy_ratio`, `hf_ratio_db`, `envelope_cv` and the
+duration are always computed on the row's own window in its own channel,
+never copied (a rescued `ll_ratio=1.62` against the 1.75 cut says the event
+was *close* in that hemisphere, not absent). In `'rescue'` mode, events with
+no candidate get no row, so channels can end up with different counts --
+that mode is for diagnosis, not normal use.
+
+**Unit of analysis changes.** After reconciliation the unit is the *event
+per animal*, not the *detection per channel*. That is why "accepted" and
+"reported" columns coexist and must not be mixed:
+
+- `seizures_events.csv`: `seizure_id` becomes the shared id;
+  `channel_seizure_id` keeps the detector's own per-channel index (NaN on
+  rescued/imputed rows); appended columns `detection_status`,
+  `accepted_in_n_channels`, `accepted_in_regions`, `n_channels_total`,
+  `is_bilateral_accepted` (accepted in >= 2 channels), `fragmented` (this
+  channel contributes more than one row to the same event -- kept as
+  separate rows, never merged), `ref_start_s`/`ref_end_s` (reference
+  window, same on every channel), `rejected_by`. Whether an event was
+  bilateral or unilateral is answered by `accepted_in_n_channels`, never
+  by the row count.
+- `seizures_summary.csv`: every pre-existing column still describes what
+  THIS channel accepted (so `n_seizures` = `n_seizures_accepted`); appended
+  `n_seizures_accepted`, `n_seizures_reported`, `n_events_reported`,
+  `n_rescued`, `n_imputed`, and time-in-seizure twice:
+  `total_seizure_time_s_accepted` / `_reported`,
+  `pct_time_in_seizure_accepted` / `_reported`.
+- `natus_review_sheet.csv`: one row per (seizure_id, channel), grouped by
+  event, with `seizure_id`, `detection_status`, `accepted_in_regions`,
+  `source_file`.
+- `03_seizures/`: figures are drawn by `utils/save_bilateral_seizure_figures.m`
+  (the detectors' own per-channel figures are discarded):
+  one zoom per event and channel, `{base}_{status}_seizure{seizure_id:02d}.png/.fig`
+  with the channel's status in the name (e.g.
+  `005-s_20260329_171443_HPCl_imputed_seizure03.png`), titled e.g.
+  `Crisis 3 (HPCr, accepted)` / `Crisis 3 (HPCl, rescued, ll_ratio=1.62 < 1.75)` /
+  `Crisis 3 (HPCl, imputed: no candidate in this channel)`; red = accepted,
+  orange = rescued, blue = imputed (legend on every figure), reference
+  window dotted; rescued/imputed outlined dashed on the panorama
+  (`{base}_seizures.png/.fig`, all statuses, name unchanged). Outputs
+  written before 2026-10-04 used `{base}_seizure{NN}`; rename them with
+  `tools/rename_seizure_figures_by_status.m`.
+- IID: with `exclude_rescued_from_iid = true` the exclusion zones include
+  rescued/imputed rows (their `source_id` is the shared `seizure_id`).
+- `merge_pipeline_runs.m` propagates every column and never renumbers:
+  across runs the key is (`subject_id`, `source_file`/`session_start`,
+  `seizure_id`).
+
+With `rescue_mode = 'off'` none of this runs and every output is
+byte-identical to the pipeline before this stage existed. See
+KNOWN_ISSUES.md for why systematic rescue can mask genuinely unilateral
+seizures.
+
 ## Invocation
 
 ```matlab
 addpath('src');
 addpath('src/utils');
 
-cfg = pipeline_config();
-cfg.edf.subject_id = '097';                       % '' would derive it from the EDF filename
+cfg = campaign_config();                          % or pipeline_config() for the untouched defaults
+cfg.edf.subject_id = '097-s';                     % exactly as in the Excel ('' would derive it from the EDF filename)
+cfg.edf.channels.log_file = fullfile('..', 'EEG_recording_log.xlsx');
 cfg.paths.output_root = fullfile(pwd, 'pipeline_output');
-% cfg.edf.channels.mode = 'map';                  % once you know the real region names:
-% cfg.edf.channels.map  = containers.Map({'A7C1','A7C3'}, {'HPCleft','HPCright'});
+% campaign_config() already sets rescue_mode = 'rescue_and_impute' with the
+% review band off; with pipeline_config() set both yourself (see
+% "Bilateral reconciliation") -- rescue_mode alone stops the run.
+% Gain reference: run_all_subjects.m computes it with compute_run_reference.m;
+% here, without one, attenuated channels get no gain (warning, no error).
 
 result = run_pipeline_edf('097-s', cfg);           % folder of .edf files
+% result = run_pipeline_edf({'097-s/a.EDF', '097-s/b.EDF'}, cfg);   % or a list of files
 
 % Everything above is also in memory, not just on disk:
 result.seizures_events
@@ -262,7 +639,7 @@ To debug a single file/channel without running the whole batch:
 
 ```matlab
 cfg = pipeline_config();
-cfg.edf.subject_id = '097';
+cfg.edf.subject_id = '097-s';
 cfg.edf.output_dir = 'tmp/01_txt';
 [manifest, gaps, meta] = edf_import('097-s/some_file.EDF', cfg);
 
@@ -281,8 +658,11 @@ iid = detect_iid(clean, seizures.seizures, cfg);    % omit/[] the 2nd arg to ski
 ## Repository layout
 
 ```
+run_all_subjects.m / .ps1     campaign runner: EDF list or folders -> reference -> one run per animal -> merge
 src/
   pipeline_config.m          all parameters, one struct, traceable to source scripts
+  campaign_config.m           the campaign's settings on top of pipeline_config.m
+  compute_run_reference.m     campaign pre-pass: import every EDF, gain reference from non-attenuated channels
   edf_import.m                EDF -> continuous txt per channel + gaps CSV
   load_lfp_txt.m               generic txt reader (replaces load_LFP_intan_txt.m)
   clean_lfp.m                  outlier removal -> *_clean.txt
@@ -298,6 +678,8 @@ src/
     read_pipeline_csv.m                   safe reader for the 05_summaries/ CSVs
     write_all_summaries.m, build_natus_review_sheet.m   shared writer, used by both
       run_pipeline_edf.m and merge_pipeline_runs.m
+    robust_vertcat.m                      never-failing table stacking for the final summaries
+    load_recording_log.m, excel_attenuation.m, resolve_case_excel.m   the Excel: channels, Attenuation -> case
     apply_tz.m, vertcat_or_empty.m, empty_*_table.m     table-schema plumbing shared by
       the writer and read_pipeline_csv.m (single source of truth, see their headers)
 KNOWN_ISSUES.md               methodological caveats carried over unchanged, on purpose
