@@ -36,12 +36,38 @@ events = struct([]);
 % optional 9th column: per-event overrides, struct('win_s', 4) or 'win_s=4; fmax=60'
 manual = {
 % id        tipo       subject  sesion              region  inicio                     fin                        time_ref
- 'zona1'   'iid'      '073-s'  '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068'  'both'  '09/07/2026 17:49:03.000'  '09/07/2026 22:30:00.000'  'natus'  struct('spike_source', 'detect_local')
- 'zona2'   'iid'      '073-s'  '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068'  'both'  '10/07/2026 09:38:32.000'  '10/07/2026 15:43:55.000'  'natus'  struct('spike_source', 'detect_local')
 };
-% IID intervals longer than cfg.spec.iid.max_interval_s (600 s) run in 'zone' mode: spike-aligned
-% maps over every spike of the zone + spike-rate overview (no continuous scalogram).
 events = [events, spec_read_event_list(manual)];
+
+%% A2. Spike zones -> short intervals spread over each zone
+% n_tramos intervals of dur_tramo_s, evenly spaced from the start to the end of the zone
+% (Natus clock), each one an 'iid' event like a manual row: continuous scalogram + spike maps.
+% incluir_zona_completa = true also runs the whole zone (zone mode: spike-aligned maps over
+% every spike + spike-rate overview, no continuous scalogram).
+zonas = {
+% id       subject  sesion                                                 inicio (Natus)             fin (Natus)
+ 'zona1'  '073-s'  '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068'  '09/07/2026 17:49:03.000'  '09/07/2026 22:30:00.000'
+ 'zona2'  '073-s'  '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068'  '10/07/2026 09:38:32.000'  '10/07/2026 15:43:55.000'
+};
+n_tramos = 6;
+dur_tramo_s = 120;
+incluir_zona_completa = false;
+opts_zona = struct('spike_source', 'detect_local');     % no 04_iid for this animal
+fmt = 'dd/MM/yyyy HH:mm:ss.SSS';
+for z = 1:size(zonas, 1)
+    z0 = datetime(zonas{z, 4}, 'InputFormat', fmt);
+    z1 = datetime(zonas{z, 5}, 'InputFormat', fmt);
+    starts = z0 + seconds(linspace(0, seconds(z1 - z0) - dur_tramo_s, n_tramos));
+    rows = cell(n_tramos, 9);
+    for k = 1:n_tramos
+        rows(k, :) = {sprintf('%s_t%02d', zonas{z, 1}, k), 'iid', zonas{z, 2}, zonas{z, 3}, 'both', ...
+            char(starts(k), fmt), char(starts(k) + seconds(dur_tramo_s), fmt), 'natus', opts_zona};
+    end
+    if incluir_zona_completa
+        rows(end+1, :) = {zonas{z, 1}, 'iid', zonas{z, 2}, zonas{z, 3}, 'both', zonas{z, 4}, zonas{z, 5}, 'natus', opts_zona}; %#ok<SAGROW>
+    end
+    events = [events, spec_read_event_list(rows)]; %#ok<AGROW>
+end
 
 % Same columns in an Excel / CSV (extra columns by name = overrides):
 % events = [events, spec_read_event_list(fullfile(repo, 'spectrogram_events.xlsx'))];
