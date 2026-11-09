@@ -11,6 +11,8 @@ function T = rename_seizure_figures_by_status(output_root, apply)
 %
 % output_root : a campaign output (one subfolder per animal, each with
 %               03_seizures/) or a single run_pipeline_edf.m output_root.
+%               Files are looked for in 03_seizures/ and in each of its
+%               03_seizures/<EDF>/ subfolders.
 %
 % The status of each zoom comes from {base}_seizures.mat in the same
 % folder (seizure_results.seizures: seizure_id, detection_status = accepted
@@ -118,7 +120,7 @@ end
 
 function dirs = seizure_dirs(output_root)
     if isfolder(fullfile(output_root, '03_seizures'))
-        dirs = {fullfile(output_root, '03_seizures')};
+        dirs = with_edf_subfolders({fullfile(output_root, '03_seizures')});
         return;
     end
     d = dir(output_root);
@@ -128,6 +130,21 @@ function dirs = seizure_dirs(output_root)
         p = fullfile(output_root, d(k).name, '03_seizures');
         if isfolder(p)
             dirs{end+1} = p; %#ok<AGROW>
+        end
+    end
+    dirs = with_edf_subfolders(dirs);
+end
+
+function out = with_edf_subfolders(dirs)
+% Each 03_seizures/ (files of older, flat outputs) followed by its
+% 03_seizures/<EDF>/ subfolders (run_pipeline_edf.m writes one per EDF).
+    out = {};
+    for i = 1:numel(dirs)
+        out{end+1} = dirs{i}; %#ok<AGROW>
+        s = dir(dirs{i});
+        s = s([s.isdir] & ~ismember({s.name}, {'.', '..'}));
+        for k = 1:numel(s)
+            out{end+1} = fullfile(dirs{i}, s(k).name); %#ok<AGROW>
         end
     end
 end

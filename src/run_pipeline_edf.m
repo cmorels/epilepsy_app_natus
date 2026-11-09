@@ -17,8 +17,8 @@ function result = run_pipeline_edf(input_folder, cfg)
 % Output layout under cfg.paths.output_root:
 %   01_txt/        txt per channel + gaps CSV (edf_import.m)
 %   02_clean/      *_clean.txt (clean_lfp.m, after precondition_lfp.m's gain + notch)
-%   03_seizures/   mat/fig/png per channel (detect_seizures.m)
-%   04_iid/        mat/fig/png per channel (detect_iid.m)
+%   03_seizures/<EDF>/   mat/fig/png per channel (detect_seizures.m); <EDF> = EDF file name without extension
+%   04_iid/<EDF>/        mat/fig/png per channel (detect_iid.m)
 %   05_summaries/  the 9 consolidated CSVs + pipeline_summary.xlsx
 %   logs/          timestamped run log
 %   config_used.mat / config_used.json  (the exact cfg this run used)
@@ -152,6 +152,17 @@ function result = run_pipeline_edf(input_folder, cfg)
             file_subject_map(files(f).name) = manifest.subject_id{1};
         end
 
+        % 03_seizures/ and 04_iid/: one subfolder per EDF (its file name without extension).
+        [~, edf_stem] = fileparts(files(f).name);
+        file_dirs = dirs;
+        file_dirs.seizures = fullfile(dirs.seizures, edf_stem);
+        file_dirs.iid = fullfile(dirs.iid, edf_stem);
+        for sub = {file_dirs.seizures, file_dirs.iid}
+            if ~isfolder(sub{1})
+                mkdir(sub{1});
+            end
+        end
+
         channel_ctx = {};
         for c = 1:height(manifest)
             row = manifest(c, :);
@@ -245,7 +256,7 @@ function result = run_pipeline_edf(input_folder, cfg)
                     detector_dir = tempname();
                     file_cfg.seizure.output_dir = detector_dir;
                 else
-                    file_cfg.seizure.output_dir = dirs.seizures;
+                    file_cfg.seizure.output_dir = file_dirs.seizures;
                 end
                 try
                     if strcmp(seizure_mode, 'robust')
@@ -280,7 +291,7 @@ function result = run_pipeline_edf(input_folder, cfg)
                 % recording are detected (bilateral_reconcile.m / bilateral_events.m).
                 channel_ctx{end+1} = ctx; %#ok<AGROW>
             else
-                out = finalize_channel(ctx, file_cfg, dirs, log_file, false, false);
+                out = finalize_channel(ctx, file_cfg, file_dirs, log_file, false, false);
                 [seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts] = ...
                     append_parts(out, seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts);
             end
@@ -288,14 +299,14 @@ function result = run_pipeline_edf(input_folder, cfg)
 
         if deferred && ~isempty(channel_ctx)
             if bilateral_on
-                channel_ctx = reconcile_file_channels(channel_ctx, file_cfg, dirs, log_file);
+                channel_ctx = reconcile_file_channels(channel_ctx, file_cfg, file_dirs, log_file);
             end
             outs = cell(1, numel(channel_ctx));
             for c = 1:numel(channel_ctx)
-                outs{c} = finalize_channel(channel_ctx{c}, file_cfg, dirs, log_file, bilateral_on, band_on);
+                outs{c} = finalize_channel(channel_ctx{c}, file_cfg, file_dirs, log_file, bilateral_on, band_on);
             end
             if band_on
-                outs = finalize_file_events(outs, channel_ctx, file_cfg, dirs, log_file);
+                outs = finalize_file_events(outs, channel_ctx, file_cfg, file_dirs, log_file);
             end
             for c = 1:numel(outs)
                 [seizure_event_parts, seizure_summary_parts, iid_event_parts, iid_summary_parts, iid_burst_parts, qc_parts] = ...
