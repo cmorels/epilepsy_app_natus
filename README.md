@@ -688,3 +688,179 @@ KNOWN_ISSUES.md               methodological caveats carried over unchanged, on 
 The Intan-era scripts at the repo root and `functions/dual_convert_txt_dat/`
 are unmodified reference material (format/logic), not part of this
 pipeline's call graph.
+
+## Spectrogram module (`06_spectrograms`)
+
+Module 3, independent of detection: it runs, when you decide, on outputs
+already on disk (the `*_clean.txt` of `02_clean`, optionally the
+`seizures_events` of `05_summaries` and the `*_IID_results.mat` of
+`04_iid`), and only on the seizures / intervals you choose -- never on the
+whole recording. It does not call `detect_*` / `run_pipeline_edf`, they do
+not call it, and it never reads an EDF: a missing txt is an error telling
+you to run the pipeline's import + cleaning first. Code: `src/spectrogram/`
+(every function `spec_*`, config `spectrogram_config.m`), entry script
+`run_spectrograms.m`, tests `tests/spectrogram/`.
+
+```matlab
+run_spectrograms        % edit the file: paths, events, parameters
+% or, from code:
+cfg = spectrogram_config();  cfg.spec.pipeline_root = '...';
+out = spec_run(cfg, [spec_read_event_list(manual), spec_select_seizures(sel, cfg)]);
+runtests('tests/spectrogram')   % synthetic + I/O + clock tests
+```
+
+### Choosing what is processed
+
+Three sources, combined into one list (`[events_A, events_B, events_C]`):
+
+- **A. manual table** in `run_spectrograms.m` (or the same columns in an
+  Excel / CSV read with `spec_read_event_list(file)`): `id, tipo
+  ('seizure'|'iid'), subject, sesion ('yyyyMMdd_HHmmss' or EDF name),
+  region ('HPCr'|'HPCl'|'both'), inicio, fin, time_ref`. `inicio`/`fin`
+  are `'dd/MM/yyyy HH:mm:ss.SSS'` in the `time_ref` clock (`'natus'` |
+  `'pipeline'`) or a number = `t_rel` in s. Optional per-event overrides:
+  a 9th column (`struct('win_s', 4)` or `'win_s=4; fmax=60'`) or extra
+  Excel columns named like the override (`win_s, step_s, tw, k, fmin,
+  fmax, cycles, baseline, pad_pre_s, pad_post_s, postictal_s, norm, clim,
+  signal_source, spike_source, polarity, threshold_mode, ...`, see
+  `spec_run.m`); `peaks` = manual spike times separated by `;`.
+- **B. detected seizures by ID**: `sel.ids = {subject, sesion, [seizure_id]}`
+  (or `sel.id_field = 'event_id'`).
+- **C. detected seizures by filter**: `sel.filter.subject / sesion / region /
+  user_check / category / detection_status / date_range / duration_s /
+  max_n`.
+
+For B and C onset / offset are the rows' `start_s` / `end_s` (seconds from
+the txt start, i.e. the pipeline clock); with `sel.region = 'both'` the
+HPCr and HPCl rows of one `seizure_id` become one event and one figure.
+The table may be the pipeline's CSV, the `seizures_events` sheet of
+`pipeline_summary.xlsx` or your reviewed copy: `user_check` / `comments`
+are found by header name (not by column letter), `subject_id` stays text,
+and the `session_start` / `start_abs` text columns are never used for
+timing (Excel re-saving turns them into e.g. `00:48.6`): times are always
+`session_start` from the txt header + `start_s`.
+
+**Dry run** (`cfg.spec.dry_run = true`, the default): resolves everything
+and writes `06_spectrograms_summary/_selection_preview.csv` (one row per
+event x region: txt, `t_rel`, Natus and pipeline clock, duration, NaN %,
+peak source, status `ok` / `error: ...` / `duplicate`) without computing.
+Duplicates (same subject, session, region, type and interval) are skipped
+with a warning.
+
+### Natus clock vs pipeline clock
+
+- **pipeline** = `session_start` (with its TimeZone, `Europe/Paris`) +
+  `t_rel` (`rel_to_abs_time.m`), the clock of `start_abs` in
+  `seizures_events`. It follows daylight-saving changes.
+- **Natus** = wall-clock time at session start + `t_rel`, with no
+  daylight-saving jump. For a session that started before 29/03/2026, the
+  pipeline clock is 1 h ahead of Natus after that date (and the reverse
+  around 25/10/2026). Within one season both are identical.
+
+Every figure and the preview show both clocks and `t_rel`. A pipeline-clock
+time inside the repeated autumn hour is refused as ambiguous (give it in
+Natus time or `t_rel`).
+
+### What is computed
+
+- **Window**: `[inicio - pad, fin + pad]` plus an automatic margin =
+  max(half the multitaper window, 3 sigma_t of the lowest-frequency
+  wavelet, sigma_t = cycles / (2 pi f)), dropped before plotting. Events
+  with more than `max_nan_frac` (5 %) NaN are skipped; otherwise windows
+  touching a NaN stay NaN (never interpolated, filtering per gap-free block).
+- **Signal**: `signal_source = 'clean'` uses the `*_clean.txt` as written
+  (gain, outlier interpolation and notch already applied, not re-applied);
+  `'raw'` uses the `01_txt` x `gain_applied` and the same notch when the
+  clean header says `notch_applied`, without `clean_lfp`'s linear
+  interpolation of samples beyond +-2500 uV. With the `01_txt` available,
+  the number of interpolated samples in each window is reported; without
+  it the session total of the clean header is shown. TF signal: mean /
+  trend removed per block, no band-pass; trace: 1-100 Hz zero-phase.
+- **Seizures** (`spec_seizure_event.m`): multitaper (`dpss`; 2 s windows,
+  0.1 s step, TW 3, K 5 -> 3 Hz resolution, 0.5-100 Hz) and Morlet (1-100
+  Hz, 80 log-spaced, 3-10 cycles growing linearly with f), baseline
+  `[-30 -5]` s re onset or an absolute interval (warned if it contains a
+  gap, another seizure or an IID exclusion zone), PSD baseline / ictal /
+  post-ictal. Features: peak frequency (absolute and re baseline), band
+  power ictal / baseline in dB (delta 1-4, theta 4-12, beta 12-30, gamma
+  30-100 Hz), dominant-frequency curve (`.mat`) and its mean / slope (CSV).
+  Peak and dominant frequency skip the notch band (50 Hz +- half-width +
+  1 Hz + half the multitaper resolution). The dominant frequency of each
+  window is, by default (`seizure.domfreq_method = 'aperiodic'`), the
+  peak of the spectrum above its 1/f background (log-log line fit): the
+  rhythm that stands out. `'baseline_ratio'` (max of the power re
+  baseline) jumps across the band in broadband seizures; `'absolute_band'`
+  takes the max of the absolute power within `domfreq_band` (2-30 Hz).
+  `peak_freq_osc_hz` is the same 1/f-corrected peak for the whole ictal PSD.
+- **IIDs** (`spec_iid_interval.m`): peaks from `04_iid` (`'pipeline'`),
+  re-detected in the interval with detect_iid's steps and values
+  (`'detect_local'`, threshold `pipeline_grid` | `p97` | `fixed`), or
+  given (`'manual'`); re-aligned to the extremum within +-20 ms (polarity
+  `auto` | `neg` | `pos`, sub-sample); epochs `[-0.5 0.5]` s excluded when
+  they touch a NaN / the cone of influence, an exclusion zone or the window
+  edge. Morlet 2-150 Hz on the continuous interval, then induced (mean of
+  single-spike power), evoked (TF of the average spike) and ITC, baseline
+  `[-0.5 -0.3]` s re peak. A sharp transient alone yields broadband power
+  without any oscillation; the average trace is always drawn above the TF.
+  Peaks whose extremum falls on the edge of the +-20 ms search are counted
+  (`n_align_at_limit`) and warned, not dropped.
+- **IID zones** (intervals longer than `iid.max_interval_s`, 600 s, e.g.
+  hours of a spiking period): same spike detection / re-alignment /
+  exclusions over the whole zone, spike-aligned induced / evoked / ITC and
+  average waveform over every usable spike (the CWT is computed in
+  `iid.zone_chunk_s` blocks with 3 sigma_t of extra signal, identical to a
+  CWT of the whole zone -- tested), plus a min/max overview of the trace
+  and the spike rate per `iid.rate_bin_s`. No continuous scalogram (hours
+  of it would need GBs of RAM). The `.mat` keeps at most
+  `iid.max_traces_saved` individual spike traces; mean / SEM use all.
+
+### Outputs
+
+```
+<output_root>\<subject>\06_spectrograms\<subject>_<session>\<id>_<region>.mat / .fig / .png (300 dpi)
+<output_root>\<subject>\06_spectrograms\_cache\        binary signal cache (see below)
+<output_root>\06_spectrograms_summary\                 spec_features_seizures.csv, spec_features_iid.csv,
+                                                        spec_run_log.txt, _selection_preview*.csv
+```
+
+Each `.mat` holds `res` (maps, frequencies, times, effective `cfg.spec`,
+the loaded signal, peaks used / excluded, source files, header,
+case / gain / notch, `seizure_id` / `event_id` / `user_check`), `features`
+and the git hash; `spec_plot_seizure(S.res)` / `spec_plot_iid(S.res)`
+redraws the figure without reading any txt. The feature CSVs are rebuilt
+from every `.mat` at the end of each run (re-running an event replaces its
+row) and carry `subject_id, region, source_file, session_start,
+seizure_id, event_id` to join with `05_summaries`. Nothing is written in
+`01_txt`-`05_summaries`.
+
+**Signal cache**: a 24-48 h txt holds 45-85 M samples (~2 GB of RAM through
+`load_lfp_txt.m`). The first use of a txt streams it once into a float64
+binary (`_cache`, ~0.7 GB per channel for 46 h, same values as
+`load_lfp_txt`), later windows are read directly from it; it is rebuilt if
+the txt changes size or date. `cfg.spec.cache_disk = false` keeps it in
+`tempdir` and deletes it at the end of the run. Build time is in the log.
+
+### Parameters (`cfg.spec`, defaults in `spectrogram_config.m`)
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `pipeline_root` / `output_root` | `''` | animals folder / where `06_*` goes (`''` = pipeline_root) |
+| `dry_run` | `true` | preview only |
+| `signal_source` | `'clean'` | `'clean'` or `'raw'` |
+| `max_nan_frac` | 0.05 | skip events with more NaN |
+| `norm` | `'db_baseline'` | `'db'`, `'db_baseline'`, `'zscore'` or `'percent'` |
+| `clim` | `'auto'` | or `[min max]` fixed across animals (`auto` = 2-98 percentiles) |
+| `cmap` / `freq_scale` | `parula` / `'linear'` | colormap / y axis of the multitaper and PSD (`'log'`) |
+| `seizure.pad_pre_s`, `pad_post_s` | 30, 30 | context around the seizure |
+| `seizure.baseline` | `[-30 -5]` | s re onset, or `{'dd/MM/yyyy HH:mm:ss.SSS','...'}` (`baseline_time_ref`) |
+| `seizure.mt` | win 2 s, step 0.1 s, TW 3, K 5, 0.5-100 Hz | multitaper |
+| `seizure.morlet` | 1-100 Hz, 80, cycles [3 10] linear | scalogram |
+| `seizure.postictal_s` | 30 | post-ictal PSD (0 = off) |
+| `iid.spike_source` | `'pipeline'` | `'pipeline'`, `'detect_local'` or `'manual'` |
+| `iid.polarity`, `align_ms`, `align_on` | `'auto'`, 20, `'analysis'` | re-alignment |
+| `iid.epoch_s`, `iid.baseline` | `[-0.5 0.5]`, `[-0.5 -0.3]` | epochs / baseline re peak |
+| `iid.morlet` | 2-150 Hz, 80, cycles [3 7] | |
+| `iid.detect.*` | detect_iid's values (pipeline_config `cfg.iid`) | `detect_local` |
+| `iid.max_interval_s` | 600 | longer IID intervals run in zone mode |
+| `iid.zone_chunk_s`, `rate_bin_s`, `max_traces_saved` | 60, 60, 300 | zone mode |
+| `seizure.domfreq_method` | `'aperiodic'` | or `'baseline_ratio'`, `'absolute_band'` (`domfreq_band` [2 30]) |

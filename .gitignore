@@ -28,3 +28,10 @@ pipeline_output/
 
 # Windows thumbnail cache
 Thumbs.db
+
+# Local test data for one animal (clean txt + EDF + reviewed seizures_events) -- never commit
+073-s/
+
+# Spectrogram module outputs (src/spectrogram, run_spectrograms.m) -- regenerable
+06_spectrograms/
+06_spectrograms_summary/
