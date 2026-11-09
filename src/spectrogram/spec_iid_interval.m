@@ -254,7 +254,7 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
         fwhm(k) = fwhm_ms(tr, c0, median(tr(bcols), 'omitnan'), wnd, fs);
     end
     mw = abs(te) <= p.maxfreq_window_ms / 1000;
-    [fex, fex_txt] = spec_notch_band(r, seg.notch_applied, 0);
+    [fex, fex_txt, notch_band] = spec_notch_band(r, seg.notch_applied, 0);
     prof = mean(Zind(:, mw), 2, 'omitnan');
     prof(fex(mo.f)) = NaN;
     [~, im] = max(prof);
@@ -321,7 +321,7 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
         'signal_source', seg.source, 'gain_applied', seg.gain_applied, 'notch_applied', seg.notch_applied, ...
         'case_applied', seg.case_applied, 'n_outliers_window', seg.n_outliers_segment, ...
         'excel_attenuation', r.excel_attenuation, 'header', r.hdr.meta, ...
-        'cache_build_s', seg.load_info.build_s, 'cache_reused', seg.load_info.reused);
+        'cache_build_s', seg.load_info.build_s, 'cache_reused', seg.load_info.reused, 'notch_band', notch_band);
     res.clim_tf = pick_clim({Zind, Zev}, s);
     if zone_mode
         res.clim_cont = [];

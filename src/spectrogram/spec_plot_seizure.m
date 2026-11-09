@@ -43,6 +43,7 @@ function fig = spec_plot_seizure(res)
 
         ax2 = nexttile(tl, nreg + k);
         tf_image(ax2, c.mt.t, c.mt.f, c.mt.Z, res.clim_mt, s.cmap, strcmp(s.freq_scale, 'log'));
+        mark_notch(ax2, notch_band_of(c.src));
         mark(ax2, on_k, off_k);
         xlim(ax2, xl);
         ylabel(ax2, 'Hz');
@@ -54,6 +55,7 @@ function fig = spec_plot_seizure(res)
 
         ax3 = nexttile(tl, 2 * nreg + k);
         tf_image(ax3, c.morlet.t, c.morlet.f, c.morlet.Z, res.clim_morlet, s.cmap, true);
+        mark_notch(ax3, notch_band_of(c.src));
         mark(ax3, on_k, off_k);
         xlim(ax3, xl);
         ylabel(ax3, 'Hz');
@@ -125,6 +127,30 @@ function fig = spec_plot_seizure(res)
 end
 
 %% ======================================================================
+function nb = notch_band_of(src)
+% notch band (lo hi rows) stored by the event, or rebuilt from the clean header
+    nb = zeros(0, 2);
+    if isfield(src, 'notch_band')
+        nb = src.notch_band;
+    elseif isfield(src, 'notch_applied') && src.notch_applied && isfield(src.header, 'notch_freqs')
+        f = sscanf(char(src.header.notch_freqs), '%f');
+        hw = 1;
+        if isfield(src.header, 'notch_halfwidth_hz')
+            hw = str2double(src.header.notch_halfwidth_hz);
+        end
+        nb = [f(:) - hw - 1, f(:) + hw + 1];
+    end
+end
+
+function mark_notch(ax, nb)
+% dotted lines at the notch band: power / phase there is shaped by the
+% pipeline's 50 Hz notch (its ringing is phase-locked to each event)
+    for k = 1:size(nb, 1)
+        yline(ax, nb(k, 1), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
+        yline(ax, nb(k, 2), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
+    end
+end
+
 function tf_image(ax, t, f, Z, cl, cmap, logy)
     h = pcolor(ax, t, f, Z);
     h.EdgeColor = 'none';

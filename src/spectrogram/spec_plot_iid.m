@@ -68,6 +68,7 @@ function fig = spec_plot_iid(res)
         title(ax2, sprintf('spike rate (%g s bins)', res.rate.bin_s(1)), 'FontSize', 8, 'FontWeight', 'normal');
     else
         tf_image(ax2, res.cont.t - t0, res.f, res.cont.Z, res.clim_cont, s.cmap, logy);
+        mark_notch(ax2, notch_band_of(res.src));
         ylabel(ax2, 'Hz');
         cb = colorbar(ax2);
         cb.Label.String = res.cont.label;
@@ -101,7 +102,9 @@ function fig = spec_plot_iid(res)
         'FontSize', 8, 'FontWeight', 'normal');
 
     ax4 = nexttile(tl, 6);
-    tf_image(ax4, te, res.f, res.induced.Z, res.clim_tf, s.cmap, logy);
+    nb = notch_band_of(res.src);
+    tf_image(ax4, te, res.f, res.induced.Z, map_clim(res.induced.Z, s), s.cmap, logy);
+    mark_notch(ax4, nb);
     xline(ax4, 0, 'w:');
     cb = colorbar(ax4);
     cb.Label.String = res.norm_label;
@@ -109,7 +112,8 @@ function fig = spec_plot_iid(res)
         s.iid.maxfreq_window_ms, f.induced_peak_freq_hz), 'FontSize', 8, 'FontWeight', 'normal');
 
     ax5 = nexttile(tl, 7);
-    tf_image(ax5, te, res.f, res.evoked.Z, res.clim_tf, s.cmap, logy);
+    tf_image(ax5, te, res.f, res.evoked.Z, map_clim(res.evoked.Z, s), s.cmap, logy);
+    mark_notch(ax5, nb);
     xline(ax5, 0, 'w:');
     xlabel(ax5, 'ms re peak');
     ylabel(ax5, 'Hz');
@@ -120,10 +124,12 @@ function fig = spec_plot_iid(res)
     ax6 = nexttile(tl, 8);
     if s.iid.itc
         tf_image(ax6, te, res.f, res.itc, [0 1], s.cmap, logy);
+        mark_notch(ax6, nb);
         xline(ax6, 0, 'w:');
         cb = colorbar(ax6);
         cb.Label.String = 'ITC';
-        title(ax6, 'inter-trial phase coherence', 'FontSize', 8, 'FontWeight', 'normal');
+        title(ax6, 'inter-trial phase coherence (dotted: notch band, its ringing is spike-locked)', ...
+            'FontSize', 8, 'FontWeight', 'normal');
     else
         axis(ax6, 'off');
     end
@@ -163,6 +169,48 @@ function tf_image(ax, t, f, Z, cl, cmap, logy)
     ylim(ax, [f(1) f(end)]);
     if logy
         set(ax, 'YScale', 'log');
+    end
+end
+
+function cl = map_clim(Z, s)
+% Colour limits of ONE map: fixed cfg.spec.clim, or its own percentiles
+% (induced and evoked differ by tens of dB: a shared scale flattens one).
+    if isnumeric(s.clim) && numel(s.clim) == 2
+        cl = s.clim(:)';
+        return;
+    end
+    v = Z(isfinite(Z));
+    if isempty(v)
+        cl = [0 1];
+        return;
+    end
+    cl = prctile(v, s.clim_prctile);
+    if cl(2) <= cl(1)
+        cl(2) = cl(1) + 1;
+    end
+end
+
+function nb = notch_band_of(src)
+% notch band (lo hi rows) stored by the event, or rebuilt from the clean header
+    nb = zeros(0, 2);
+    if isfield(src, 'notch_band')
+        nb = src.notch_band;
+    elseif isfield(src, 'notch_applied') && src.notch_applied && isfield(src.header, 'notch_freqs')
+        f = sscanf(char(src.header.notch_freqs), '%f');
+        hw = 1;
+        if isfield(src.header, 'notch_halfwidth_hz')
+            hw = str2double(src.header.notch_halfwidth_hz);
+        end
+        nb = [f(:) - hw - 1, f(:) + hw + 1];
+    end
+end
+
+function mark_notch(ax, nb)
+% dotted lines at the notch band: power / phase there is shaped by the
+% pipeline's 50 Hz notch (its ringing is phase-locked to each event)
+    for k = 1:size(nb, 1)
+        yline(ax, nb(k, 1), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
+        yline(ax, nb(k, 2), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
     end
 end
 

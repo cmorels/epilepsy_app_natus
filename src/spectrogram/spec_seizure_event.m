@@ -148,6 +148,7 @@ function c = one_region(r, ev, ctx, s, on, t_lo, t_hi, margin)
     % the notch dip (+- its half-width + half the multitaper resolution) is no frequency of the seizure:
     % excluded from peak / dominant-frequency searches (band powers keep it, it is in both terms)
     [fex, fex_txt] = spec_notch_band(r, seg.notch_applied, mt_info.resolution_hz / 2);
+    [~, ~, notch_band] = spec_notch_band(r, seg.notch_applied, 0);   % shown on the maps
     fsel = f_mt >= z.feature_fmin & f_mt <= z.mt.fmax & ~fex(f_mt);
     feat = struct();
     [~, i1] = max(psd_ic(fsel));
@@ -224,7 +225,8 @@ function c = one_region(r, ev, ctx, s, on, t_lo, t_hi, margin)
         'case_applied', seg.case_applied, 'quality_class', meta_text(r.clean_hdr, 'quality_class'), ...
         'n_outliers_session', str2double(meta_text(r.clean_hdr, 'n_outliers')), ...
         'n_outliers_window', seg.n_outliers_segment, 'excel_attenuation', r.excel_attenuation, ...
-        'header', r.hdr.meta, 'cache_build_s', seg.load_info.build_s, 'cache_reused', seg.load_info.reused);
+        'header', r.hdr.meta, 'cache_build_s', seg.load_info.build_s, 'cache_reused', seg.load_info.reused, ...
+        'notch_band', notch_band);
     c.sz = region_row(ev, r.region);
     c.warnings = warns;
     c.features = feature_row(c, r, ev, feat, s);

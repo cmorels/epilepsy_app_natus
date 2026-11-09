@@ -7,6 +7,7 @@ function out = spec_write_outputs(action, varargin)
 %                                      spec_plot_seizure / spec_plot_iid),
 %                                      features, kind, git
 %       <out_dir>\<id>_<region>.fig / .png (png at cfg.spec.png_dpi)
+%   png = spec_write_outputs('png', fig, png_file, dpi)   % '' if it could not be written
 %   T = spec_write_outputs('summary', output_root, summary_dir)
 %       Rebuilds summary_dir\spec_features_seizures.csv and
 %       spec_features_iid.csv from EVERY event .mat under
@@ -18,6 +19,8 @@ function out = spec_write_outputs(action, varargin)
             out = write_event(varargin{:});
         case 'summary'
             out = write_summary(varargin{:});
+        case 'png'
+            out = write_png(varargin{:});
         otherwise
             error('spec_write_outputs:BadAction', 'Unknown action ''%s''.', action);
     end
@@ -50,9 +53,27 @@ function paths = write_event(res, fig, out_dir, git)
             savefig(fig, paths.fig);
         end
         if res.cfg.save_png
-            exportgraphics(fig, paths.png, 'Resolution', res.cfg.png_dpi);
+            paths.png = write_png(fig, paths.png, res.cfg.png_dpi);
         end
     end
+end
+
+function png = write_png(fig, png, dpi)
+% exportgraphics, retried: a PNG just written / previewed can be locked for
+% a moment by a viewer or the antivirus ("PNG library failed"). Still
+% failing is a warning, not a failed event (.mat / .fig exist).
+    msg = '';
+    for attempt = 1:3
+        try
+            exportgraphics(fig, png, 'Resolution', dpi);
+            return;
+        catch ME
+            msg = ME.message;
+            pause(1);
+        end
+    end
+    spec_log('  WARNING PNG not written (%s): %s -- close it if it is open, then spec_redraw on its .mat', msg, png);
+    png = '';
 end
 
 function T = write_summary(output_root, summary_dir)

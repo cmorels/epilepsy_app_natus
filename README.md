@@ -827,7 +827,17 @@ Each `.mat` holds `res` (maps, frequencies, times, effective `cfg.spec`,
 the loaded signal, peaks used / excluded, source files, header,
 case / gain / notch, `seizure_id` / `event_id` / `user_check`), `features`
 and the git hash; `spec_plot_seizure(S.res)` / `spec_plot_iid(S.res)`
-redraws the figure without reading any txt. The feature CSVs are rebuilt
+redraws the figure without reading any txt, and `spec_redraw(mat_or_folder)`
+re-writes the `.fig` / `.png` of finished events (e.g. after a display
+change, or a PNG that could not be written because it was open; options
+such as `'clim', [-10 10]` apply to that redraw only).
+
+On the TF maps a dotted pair of lines marks the notch band (50 Hz +-
+half-width + 1 Hz) when the signal carries the pipeline's notch: there the
+power is removed and, around sharp events, the notch's ringing is
+phase-locked to them -- a horizontal band in the ITC / evoked maps at
+~50 Hz is that filter, not physiology. Each spike map (induced, evoked)
+has its own colour scale unless `cfg.spec.clim` is fixed. The feature CSVs are rebuilt
 from every `.mat` at the end of each run (re-running an event replaces its
 row) and carry `subject_id, region, source_file, session_start,
 seizure_id, event_id` to join with `05_summaries`. Nothing is written in
