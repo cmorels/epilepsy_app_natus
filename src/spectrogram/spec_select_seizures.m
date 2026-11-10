@@ -31,6 +31,13 @@ function [events, chosen] = spec_select_seizures(sel, cfg)
 % pipeline clock (start_abs) -- never the Excel text columns. events(k).sz
 % keeps each region's row (seizure_id, event_id, user_check, comments, ...).
 %
+% Corrections after review (the table itself is never modified):
+%    sel.fix = {subject, sesion, seizure_id, 'inicio'|'fin', value; ...}
+%    value: 'dd/MM/yyyy HH:mm:ss.SSS' (Natus clock) or a number (t_rel).
+%    Applied to every region of that seizure; the table times are kept in
+%    sz.start_s_table / end_s_table and sz.correction describes the change
+%    (shown in the figure title and the feature CSV).
+%
 % chosen: the selected rows of the table (+ session_key, onset_pipeline).
 
     if ~isfield(sel, 'seizures_file') || isempty(sel.seizures_file)
@@ -125,7 +132,15 @@ function [events, chosen] = spec_select_seizures(sel, cfg)
             min(rows.start_s), max(rows.end_s), 't_rel', struct(), origin);
         ev.sz = table2struct(rows(:, {'region', 'seizure_id', 'event_id', 'start_s', 'end_s', 'duration_s', ...
             'user_check', 'comments', 'category', 'detection_status', 'll_status', 'row', 'start_abs', 'source_file'}));
+        for j = 1:numel(ev.sz)
+            ev.sz(j).start_s_table = ev.sz(j).start_s;
+            ev.sz(j).end_s_table = ev.sz(j).end_s;
+            ev.sz(j).correction = '';
+        end
         events = [events, ev]; %#ok<AGROW>
+    end
+    if isfield(sel, 'fix') && ~isempty(sel.fix)
+        events = apply_fixes(events, sel.fix, s);
     end
 
     if isfield(sel, 'filter') && isfield(sel.filter, 'max_n') && ~isempty(sel.filter.max_n) && ~(isfield(sel, 'ids') && ~isempty(sel.ids))
@@ -141,6 +156,55 @@ function [events, chosen] = spec_select_seizures(sel, cfg)
 end
 
 %% ======================================================================
+function events = apply_fixes(events, fix, s)
+    if size(fix, 2) ~= 5
+        error('spec_select_seizures:BadFix', 'sel.fix must be {subject, sesion, seizure_id, ''inicio''|''fin'', value; ...}.');
+    end
+    for i = 1:size(fix, 1)
+        [sub, ses, sid, what, val] = fix{i, :};
+        [~, stem] = fileparts(ses);
+        hit = 0;
+        for k = 1:numel(events)
+            ev = events(k);
+            [~, ev_stem] = fileparts(ev.sesion);
+            if ~strcmp(ev.subject, sub) || isempty(ev.sz) || ev.sz(1).seizure_id ~= sid
+                continue;
+            end
+            r = spec_resolve_files(s.pipeline_root, ev.subject, ev.sesion, ev.sz(1).region, 'clean', s.tz);
+            if ~(strcmpi(ev_stem, stem) || strcmp(r.session_key, ses))
+                continue;
+            end
+            t = spec_resolve_times('to_t_rel', val, 'natus', r);
+            [n_new, ~] = spec_resolve_times('clocks', t, r);
+            for j = 1:numel(ev.sz)
+                switch lower(what)
+                    case 'inicio'
+                        [n_old, ~] = spec_resolve_times('clocks', ev.sz(j).start_s_table, r);
+                        ev.sz(j).start_s = t;
+                        ev.sz(j).correction = strtrim(sprintf('%s onset corrected: table %s -> %s (Natus)', ...
+                            ev.sz(j).correction, spec_resolve_times('text', n_old), spec_resolve_times('text', n_new)));
+                    case 'fin'
+                        [n_old, ~] = spec_resolve_times('clocks', ev.sz(j).end_s_table, r);
+                        ev.sz(j).end_s = t;
+                        ev.sz(j).correction = strtrim(sprintf('%s offset corrected: table %s -> %s (Natus)', ...
+                            ev.sz(j).correction, spec_resolve_times('text', n_old), spec_resolve_times('text', n_new)));
+                    otherwise
+                        error('spec_select_seizures:BadFix', 'sel.fix field must be ''inicio'' or ''fin'' (got ''%s'').', what);
+                end
+                ev.sz(j).duration_s = ev.sz(j).end_s - ev.sz(j).start_s;
+            end
+            ev.inicio = min([ev.sz.start_s]);
+            ev.fin = max([ev.sz.end_s]);
+            events(k) = ev;
+            hit = hit + 1;
+            spec_log('sel.fix: %s %s seizure_id %d: %s', sub, ses, sid, ev.sz(1).correction);
+        end
+        if hit == 0
+            spec_log('WARNING sel.fix: no selected seizure %s %s seizure_id %d to correct', sub, ses, sid);
+        end
+    end
+end
+
 function m = session_match(T, sesion)
     sesion = strtrim(char(sesion));
     if ~isempty(regexp(sesion, '^\d{8}_\d{6}$', 'once'))

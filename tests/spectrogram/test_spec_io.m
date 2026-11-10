@@ -201,6 +201,25 @@ function testSelectByIdAndFilter(tc)
     tc.verifyEqual(ev(1).id, 'sz002');
 end
 
+%% ---- feature CSV from outputs of different versions ---------------------------------
+function testSummaryMergesOlderColumns(tc)
+    out = fullfile(tc.TestData.root, 'out_summary');
+    d = fullfile(out, 'S9', '06_spectrograms', 'S9_x');
+    mkdir(d);
+    kind = 'seizure';
+    features = table({'old'}, 1.5, 'VariableNames', {'id', 'peak_freq_hz'});
+    save(fullfile(d, 'old_both.mat'), 'features', 'kind');
+    features = table({'new'}, 2.5, 10.25, {'onset corrected'}, true, ...
+        'VariableNames', {'id', 'peak_freq_hz', 'onset_t_rel_table', 'correction', 'notch_applied'});
+    save(fullfile(d, 'new_both.mat'), 'features', 'kind');
+    T = spec_write_outputs('summary', out, fullfile(out, '06_spectrograms_summary'));
+    S = sortrows(T.seizure, 'id');
+    tc.verifyEqual(S.id, {'new'; 'old'});
+    tc.verifyEqual(S.onset_t_rel_table, [10.25; NaN], 'missing numeric column -> NaN');
+    tc.verifyEqual(S.correction, {'onset corrected'; ''}, 'missing text column -> empty');
+    tc.verifyEqual(S.notch_applied, [true; false], 'missing logical column -> false');
+end
+
 %% ---- dry-run, duplicates, full run, redraw ----------------------------------------
 function testDryRunAndDuplicates(tc)
     cfg = tc.TestData.cfg;

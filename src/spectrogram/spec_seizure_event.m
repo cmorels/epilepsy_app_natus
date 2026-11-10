@@ -315,7 +315,7 @@ end
 
 function row = region_row(ev, region)
     row = struct('seizure_id', NaN, 'event_id', NaN, 'user_check', '', 'comments', '', 'category', '', ...
-        'detection_status', '', 'll_status', '', 'row', NaN);
+        'detection_status', '', 'll_status', '', 'row', NaN, 'start_s_table', NaN, 'end_s_table', NaN, 'correction', '');
     if isempty(ev.sz)
         return;
     end
@@ -354,6 +354,9 @@ function T = feature_row(c, r, ev, feat, s)
     T.domfreq_mean_hz = feat.domfreq_mean_hz;
     T.domfreq_slope_hz_per_s = feat.domfreq_slope_hz_per_s;
     T.freq_excluded = {c.psd.excluded_txt};
+    T.onset_t_rel_table = c.sz.start_s_table;
+    T.offset_t_rel_table = c.sz.end_s_table;
+    T.correction = {c.sz.correction};
     T.excel_attenuation = {c.src.excel_attenuation};
     T.warnings = {strjoin(c.warnings, ' | ')};
 end

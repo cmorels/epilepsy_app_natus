@@ -34,7 +34,13 @@ function cfg = spectrogram_config()
     s.clim = 'auto';           % 'auto' or [min max] (same units as norm), fixed across animals
     s.clim_prctile = [2 98];   % 'auto' = these percentiles of the displayed values
     s.cmap = 'parula';
-    s.freq_scale = 'linear';   % 'linear' | 'log' (y axis of every TF panel)
+    s.freq_scale = 'linear';   % 'linear' | 'log' (y axis of the multitaper map; x axis of the PSD)
+    s.freq_ticks = [10 30 100];   % Hz labels of the time-frequency maps (seizure Morlet; IID continuous,
+                               % induced, evoked, ITC), plain numbers: only those inside the map's range
+    s.freq_ticks_max = true;   % + the map's maximum frequency as the last label (e.g. 150 for 2-150 Hz)
+    s.iid_freq_scale = 'log';  % IID figure, all four TF maps (continuous, induced, evoked, ITC): 'log' | 'linear'
+    s.iid_freq_ticks = [10 30 60 90 120];   % y ticks of the IID TF maps (any scale), + their maximum (150);
+                               % per figure: spec_redraw(mat, 'iid_freq_scale', 'linear', 'iid_freq_ticks', [0 50 100])
     s.visible = false;         % figures hidden while running (saved .fig opens visible)
     s.save_fig = true;
     s.save_png = true;
@@ -69,6 +75,8 @@ function cfg = spectrogram_config()
     d.spike_source = 'pipeline';   % 'pipeline' (04_iid *_IID_results.mat) | 'detect_local' | 'manual'
     d.polarity = 'auto';           % 'auto' | 'neg' | 'pos'
     d.align_ms = 20;               % re-align each peak to the extremum within +-align_ms
+    d.exclude_at_limit = true;     % exclude a peak whose extremum falls on the edge of the +-align_ms search
+                                   % (not centred on any spike; usually a 2nd detection on a spike's flank)
     d.align_on = 'analysis';       % 'analysis' (detrended signal used for TF) | 'display' (1-100 Hz trace)
     d.epoch_s = [-0.5 0.5];
     d.baseline = [-0.5 -0.3];      % s relative to each peak, or an absolute clean interval (as seizures)

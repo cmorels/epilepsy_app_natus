@@ -13,8 +13,9 @@ function out = spec_run(cfg, events)
 %   1. resolve each event x region: files (spec_resolve_files), t_rel of
 %      inicio / fin (spec_resolve_times), NaN % (from the txt header /
 %      gaps CSV, without reading the signal), source of the spike peaks
-%   2. duplicates (same subject, session, region, tipo and interval) are
-%      skipped with a warning
+%   2. duplicates (same subject, session, region, tipo, interval AND
+%      per-event overrides) are skipped with a warning -- the same seizure
+%      with other parameters (e.g. win_s) is a separate analysis, not a duplicate
 %   3. writes <output_root>\06_spectrograms_summary\_selection_preview.csv
 %      (one row per event x region, status ok / error / duplicate)
 %   4. cfg.spec.dry_run = true -> stops here (nothing computed)
@@ -27,7 +28,8 @@ function out = spec_run(cfg, events)
 %
 % Per-event overrides (events(k).overrides, from the 9th column of the
 % manual table or extra columns of the Excel), names case-insensitive:
-%   signal_source norm clim cmap freq_scale max_nan_frac
+%   signal_source norm clim cmap freq_scale max_nan_frac freq_ticks
+%   iid_freq_scale iid_freq_ticks
 %   seizure: win_s step_s tw k pad_pre_s pad_post_s postictal_s fmin fmax
 %            cycles baseline baseline_is_t_rel baseline_time_ref
 %   iid:     spike_source polarity align_ms epoch_s fmin fmax cycles baseline
@@ -93,7 +95,8 @@ function out = spec_run(cfg, events)
                         r.on, r.off, dur);
                 end
                 r.excel_attenuation = qc_attenuation(s.pipeline_root, r);
-                key = sprintf('%s|%s|%s|%s|%d|%d', r.subject, r.session_key, reg, ev.tipo, round(r.on * 1000), round(r.off * 1000));
+                key = sprintf('%s|%s|%s|%s|%d|%d|%s', r.subject, r.session_key, reg, ev.tipo, round(r.on * 1000), ...
+                    round(r.off * 1000), jsonencode(ev.overrides));
                 if ismember(key, seen)
                     rows(end+1, :) = preview_row(ev, reg, r, ctx, 'duplicate (skipped)', s); %#ok<AGROW>
                     spec_log('WARNING %s %s: duplicate of an earlier event (same subject/session/region/interval), skipped', ev.id, reg);
@@ -247,7 +250,8 @@ function s = apply_overrides(s, ov, tipo)
         v = ov.(names{i});
         nm = lower(names{i});
         switch nm
-            case {'signal_source', 'norm', 'clim', 'cmap', 'freq_scale', 'max_nan_frac'}
+            case {'signal_source', 'norm', 'clim', 'cmap', 'freq_scale', 'max_nan_frac', ...
+                    'freq_ticks', 'iid_freq_scale', 'iid_freq_ticks'}
                 s.(nm) = v;
             case {'win_s', 'step_s'}
                 s.seizure.mt.(nm) = v;

@@ -23,10 +23,11 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
 %    re-aligned to the extremum of the analysed signal within +-align_ms
 %    with polarity 'auto' (sign of the median extremum) | 'neg' | 'pos',
 %    sub-sample (parabola). A peak whose extremum falls on the edge of the
-%    search window is counted (n_align_at_limit) and warned, not dropped.
+%    search window (n_align_at_limit) is excluded by default ('align').
 % 3. An epoch is excluded when it (or its wavelet support) leaves the
 %    loaded window ('edge'), touches a NaN ('nan'), overlaps an exclusion
-%    zone / seizure ('zone'), or repeats a used re-aligned sample ('duplicate').
+%    zone / seizure ('zone'), its extremum was not found within +-align_ms
+%    ('align', iid.exclude_at_limit) or it repeats a used re-aligned sample ('duplicate').
 % 4. Spike-aligned maps:
 %      induced = mean over spikes of |W|^2 (dB re baseline)
 %      evoked  = |mean over spikes of W|^2 (= CWT of the average spike)
@@ -112,9 +113,15 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
         idx(k) = base + j - 1;
         at_limit(k) = j == 1 || j == numel(seg_k);
     end
+    exclude_lim = ~isfield(p, 'exclude_at_limit') || p.exclude_at_limit;
     if any(at_limit)
-        warns{end+1} = sprintf(['%d of %d peak(s) re-aligned to the edge of the +-%g ms search window ' ...
-            '(no %s extremum inside it): check align_ms / polarity'], sum(at_limit), numel(at_limit), p.align_ms, pol);
+        if exclude_lim
+            warns{end+1} = sprintf(['%d of %d peak(s) excluded: no %s extremum within +-%g ms (usually a second ' ...
+                'detection on the flank of a spike already counted)'], sum(at_limit), numel(at_limit), pol, p.align_ms);
+        else
+            warns{end+1} = sprintf(['%d of %d peak(s) re-aligned to the edge of the +-%g ms search window ' ...
+                '(no %s extremum inside it): check align_ms / polarity'], sum(at_limit), numel(at_limit), p.align_ms, pol);
+        end
     end
     % sub-sample peak time: parabola through the extremum and its neighbours
     delta = zeros(size(idx));
@@ -146,6 +153,8 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
             reason{k} = 'nan';
         elseif any(pk.zones.end_s >= t_al(k) + ep(1) & pk.zones.start_s <= t_al(k) + ep(2))
             reason{k} = 'zone';
+        elseif exclude_lim && at_limit(k)          % extremum not found: not centred on any spike
+            reason{k} = 'align';
         elseif seen(idx(k))
             reason{k} = 'duplicate';
         else
@@ -339,14 +348,14 @@ function res = spec_iid_interval(ev, r, ctx, cfg)
     end
     res.features = table({ev.id}, {res.mode}, {r.subject}, {r.region}, {r.session_key}, {r.source_file}, {char(ss)}, ...
         a, b, b - a, {res.on_natus}, {res.on_pipeline}, {res.off_natus}, {res.off_pipeline}, ...
-        {pk.source}, thr, numel(pk.t), nu, numel(pk.t) - nu, count('nan'), count('zone'), count('edge'), count('duplicate'), ...
+        {pk.source}, thr, numel(pk.t), nu, numel(pk.t) - nu, count('nan'), count('zone'), count('edge'), count('duplicate'), count('align'), ...
         numel(pk.t) / ((b - a) / 60), mean(p2p, 'omitnan'), mean(fwhm, 'omitnan'), {pol}, {p.polarity}, ...
         median(abs(shift_ms), 'omitnan'), sum(at_limit), f_ind, {fex_txt}, {s.signal_source}, {label}, {seg.case_applied}, seg.gain_applied, ...
         seg.notch_applied, seg.n_outliers_segment, nan_frac, {r.excel_attenuation}, {strjoin(warns, ' | ')}, ...
         'VariableNames', {'id', 'mode', 'subject_id', 'region', 'session', 'source_file', 'session_start', ...
         'start_t_rel', 'end_t_rel', 'duration_s', 'start_natus', 'start_pipeline', 'end_natus', 'end_pipeline', ...
         'spike_source', 'threshold_uV', 'n_detected', 'n_used', 'n_excluded', 'n_excl_nan', 'n_excl_zone', ...
-        'n_excl_edge', 'n_excl_duplicate', 'rate_per_min', 'p2p_mean_uV', 'fwhm_mean_ms', 'polarity', ...
+        'n_excl_edge', 'n_excl_duplicate', 'n_excl_align', 'rate_per_min', 'p2p_mean_uV', 'fwhm_mean_ms', 'polarity', ...
         'polarity_mode', 'median_abs_shift_ms', 'n_align_at_limit', 'induced_peak_freq_hz', 'freq_excluded', 'signal_source', 'norm', 'case_applied', ...
         'gain_applied', 'notch_applied', 'n_outliers_window', 'nan_frac', 'excel_attenuation', 'warnings'});
 end

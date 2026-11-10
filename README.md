@@ -726,6 +726,11 @@ Three sources, combined into one list (`[events_A, events_B, events_C]`):
   `spec_run.m`); `peaks` = manual spike times separated by `;`.
 - **B. detected seizures by ID**: `sel.ids = {subject, sesion, [seizure_id]}`
   (or `sel.id_field = 'event_id'`).
+- **Corrections after review**: `sel.fix = {subject, sesion, seizure_id,
+  'inicio'|'fin', 'dd/MM/yyyy HH:mm:ss.SSS' (Natus) or t_rel}` replaces the
+  onset / offset of a selected seizure (all its regions) without touching
+  the table; the figure title and the CSV (`correction`,
+  `onset_t_rel_table`) keep the original.
 - **C. detected seizures by filter**: `sel.filter.subject / sesion / region /
   user_check / category / detection_status / date_range / duration_s /
   max_n`.
@@ -802,8 +807,10 @@ Natus time or `t_rel`).
   single-spike power), evoked (TF of the average spike) and ITC, baseline
   `[-0.5 -0.3]` s re peak. A sharp transient alone yields broadband power
   without any oscillation; the average trace is always drawn above the TF.
-  Peaks whose extremum falls on the edge of the +-20 ms search are counted
-  (`n_align_at_limit`) and warned, not dropped.
+  Peaks whose extremum falls on the edge of the +-20 ms search (usually a
+  second detection on the flank of a spike already counted) are excluded
+  (`n_excl_align`; `iid.exclude_at_limit = false` keeps them); the trace
+  marks only the spikes used.
 - **IID zones** (intervals longer than `iid.max_interval_s`, 600 s, e.g.
   hours of a spiking period): same spike detection / re-alignment /
   exclusions over the whole zone, spike-aligned induced / evoked / ITC and
@@ -873,4 +880,7 @@ the txt changes size or date. `cfg.spec.cache_disk = false` keeps it in
 | `iid.detect.*` | detect_iid's values (pipeline_config `cfg.iid`) | `detect_local` |
 | `iid.max_interval_s` | 600 | longer IID intervals run in zone mode |
 | `iid.zone_chunk_s`, `rate_bin_s`, `max_traces_saved` | 60, 60, 300 | zone mode |
+| `freq_ticks`, `freq_ticks_max` | `[10 30 100]`, `true` | Hz labels of the TF maps (+ the map's maximum) |
+| `iid_freq_scale`, `iid_freq_ticks` | `'log'`, `[10 30 60 90 120]` | IID TF maps: axis scale and Hz labels (+ maximum) |
+| `iid.exclude_at_limit` | `true` | drop peaks with no extremum within +-`align_ms` |
 | `seizure.domfreq_method` | `'aperiodic'` | or `'baseline_ratio'`, `'absolute_band'` (`domfreq_band` [2 30]) |

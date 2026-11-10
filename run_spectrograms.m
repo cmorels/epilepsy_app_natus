@@ -36,6 +36,8 @@ events = struct([]);
 % optional 9th column: per-event overrides, struct('win_s', 4) or 'win_s=4; fmax=60'
 manual = {
 % id        tipo       subject  sesion              region  inicio                     fin                        time_ref
+ 'tramo_2254'  'iid'  '073-s'  '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068'  'both'  '09/07/2026 22:54:33.000'  '09/07/2026 22:56:33.000'  'natus' ...
+     struct('spike_source', 'detect_local', 'iid_freq_scale', 'linear')
 };
 events = [events, spec_read_event_list(manual)];
 
@@ -78,6 +80,8 @@ selB.seizures_file = fullfile(repo, '073-s', 'seizures_events.csv');   % your re
 selB.region = 'both';                                                     % one figure with HPCr + HPCl
 selB.ids = {'073-s', '20260706_130048', [1 2]                             % {subject, sesion, [seizure_id]; ...}
             '073-s', '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068.EDF', 1};   % EDF name; its txt is not in 073-s
+% Corrections after review in Natus (the table is not modified): {subject, sesion, seizure_id, 'inicio'|'fin', time}
+selB.fix = {'073-s', '20260709B~ TRA_323846a4-5a4c-42a4-95ee-512ff8c1c068.EDF', 1, 'inicio', '09/07/2026 23:20:40.534'};   % ~10.5 s before the detected onset
 events = [events, spec_select_seizures(selB, cfg)];
 
 %% C. Detected seizures by filter

@@ -2,8 +2,10 @@ function fig = spec_plot_iid(res)
 % SPEC_PLOT_IID  Figure of one IID interval result (spec_iid_interval.m),
 % drawn ONLY from res (S = load(mat); spec_plot_iid(S.res)).
 %
-%   1. 1-100 Hz trace of the interval: used peaks (o), excluded (x)
-%   2. continuous Morlet scalogram of the interval (x linked with 1)
+% Title: animal, session, 'IID interval' (or 'IID zone'). Warnings and the
+% notch band are not drawn (they stay in res / log / CSV).
+%   1. 1-100 Hz trace of the interval (uV), spikes used (o)
+%   2. continuous morlet scalogram of the interval, dB (zone mode: spike rate)
 %   3. spike-aligned average +- SEM over the individual spikes (light)
 %   4. induced TF (mean of each spike's power)      } x linked with 3,
 %   5. evoked TF (TF of the average spike)          } t = 0 at the
@@ -20,7 +22,9 @@ function fig = spec_plot_iid(res)
     tl = tiledlayout(fig, 4, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
     t0 = res.on;
     pkk = res.peaks;
-    logy = true;
+    % y axis of the four TF maps (continuous, induced, evoked, ITC): log or linear,
+    % labels iid_freq_ticks (10 30 60 90 120) + the map's maximum (150)
+    logy = ~isfield(s, 'iid_freq_scale') || ~strcmp(s.iid_freq_scale, 'linear');
 
     zone = isfield(res, 'mode') && strcmp(res.mode, 'zone');
     ax1 = nexttile(tl, 1, [1 2]);
@@ -36,24 +40,14 @@ function fig = spec_plot_iid(res)
     plot(ax1, (res.t_trace - t0) / tu, res.trace, 'k', 'LineWidth', 0.4);
     if ~zone
         yv = interp1(res.t_trace - t0, res.trace, pkk.t_aligned - t0, 'nearest', NaN);
+        % only the spikes used in the averages / maps are marked
         plot(ax1, pkk.t_aligned(pkk.used) - t0, yv(pkk.used), 'o', 'Color', [0 0.45 0.74], 'MarkerSize', 4);
-        plot(ax1, pkk.t_aligned(~pkk.used) - t0, yv(~pkk.used), 'x', 'Color', [0.85 0.33 0.1], 'MarkerSize', 5);
-        if isfield(pkk, 'at_limit') && any(pkk.at_limit)
-            plot(ax1, pkk.t_aligned(pkk.at_limit) - t0, yv(pkk.at_limit), 's', 'Color', [0.8 0 0.8], 'MarkerSize', 7);
-        end
     end
     for k = 1:height(pkk.zones)
         xregion_safe(ax1, (pkk.zones.start_s(k) - t0) / tu, (pkk.zones.end_s(k) - t0) / tu);
     end
     xlim(ax1, [0 (res.off - t0) / tu]);
-    ylabel(ax1, 'uV (1-100 Hz)');
-    if zone
-        title(ax1, sprintf('trace overview (min/max per bin; shaded = exclusion zone)   peaks: %s', pkk.source), ...
-            'FontSize', 8, 'FontWeight', 'normal', 'Interpreter', 'none');
-    else
-        title(ax1, sprintf('trace  (o used, x excluded, square = re-aligned at the +-%g ms limit; shaded = exclusion zone)   peaks: %s', ...
-            s.iid.align_ms, pkk.source), 'FontSize', 8, 'FontWeight', 'normal', 'Interpreter', 'none');
-    end
+    ylabel(ax1, 'µV');
 
     ax2 = nexttile(tl, 3, [1 2]);
     if zone
@@ -65,17 +59,16 @@ function fig = spec_plot_iid(res)
         ylabel(ax2, 'spikes / min');
         legend(ax2, 'Location', 'northeast', 'Box', 'off');
         grid(ax2, 'on');
-        title(ax2, sprintf('spike rate (%g s bins)', res.rate.bin_s(1)), 'FontSize', 8, 'FontWeight', 'normal');
+        title(ax2, 'spike rate', 'FontSize', 9, 'FontWeight', 'normal');
     else
-        tf_image(ax2, res.cont.t - t0, res.f, res.cont.Z, res.clim_cont, s.cmap, logy);
-        mark_notch(ax2, notch_band_of(res.src));
+        tf_image(ax2, res.cont.t - t0, res.f, res.cont.Z, res.clim_cont, s, logy);
         ylabel(ax2, 'Hz');
         cb = colorbar(ax2);
-        cb.Label.String = res.cont.label;
-        title(ax2, 'continuous Morlet scalogram; grey = gap / cone of influence', 'FontSize', 8, 'FontWeight', 'normal');
+        cb.Label.String = 'dB';
+        title(ax2, 'continuous morlet scalogram', 'FontSize', 9, 'FontWeight', 'normal');
     end
     xlim(ax2, [0 (res.off - t0) / tu]);
-    xlabel(ax2, sprintf('%s from %s (Natus)', xunit, res.on_natus));
+    xlabel(ax2, sprintf('time (%s)', xunit));
     linkaxes([ax1 ax2], 'x');
 
     te = res.epochs.t * 1000;
@@ -95,80 +88,64 @@ function fig = spec_plot_iid(res)
     end
     xline(ax3, 0, 'k:');
     xlim(ax3, [te(1) te(end)]);
-    ylabel(ax3, 'uV (1-100 Hz)');
-    f = res.features;
-    title(ax3, sprintf('aligned average +- SEM (n = %d of %d, %d drawn; polarity %s [%s])  p2p %.0f uV, FWHM %.1f ms', ...
-        n_all, f.n_detected, nu, pkk.polarity, pkk.polarity_mode, f.p2p_mean_uV, f.fwhm_mean_ms), ...
-        'FontSize', 8, 'FontWeight', 'normal');
+    ylabel(ax3, 'µV');
+    title(ax3, sprintf('aligned average ± SEM (n = %d)', n_all), 'FontSize', 9, 'FontWeight', 'normal');
 
     ax4 = nexttile(tl, 6);
-    nb = notch_band_of(res.src);
-    tf_image(ax4, te, res.f, res.induced.Z, map_clim(res.induced.Z, s), s.cmap, logy);
-    mark_notch(ax4, nb);
+    tf_image(ax4, te, res.f, res.induced.Z, map_clim(res.induced.Z, s), s, logy);
     xline(ax4, 0, 'w:');
     cb = colorbar(ax4);
-    cb.Label.String = res.norm_label;
-    title(ax4, sprintf('induced (mean of single-spike power); max within +-%g ms at %.1f Hz', ...
-        s.iid.maxfreq_window_ms, f.induced_peak_freq_hz), 'FontSize', 8, 'FontWeight', 'normal');
+    cb.Label.String = 'dB';
+    title(ax4, 'induced (mean of single-spike power)', 'FontSize', 9, 'FontWeight', 'normal');
 
     ax5 = nexttile(tl, 7);
-    tf_image(ax5, te, res.f, res.evoked.Z, map_clim(res.evoked.Z, s), s.cmap, logy);
-    mark_notch(ax5, nb);
+    tf_image(ax5, te, res.f, res.evoked.Z, map_clim(res.evoked.Z, s), s, logy);
     xline(ax5, 0, 'w:');
-    xlabel(ax5, 'ms re peak');
+    xlabel(ax5, 'time relative to peak (ms)');
     ylabel(ax5, 'Hz');
     cb = colorbar(ax5);
-    cb.Label.String = res.norm_label;
-    title(ax5, 'evoked (TF of the average spike)', 'FontSize', 8, 'FontWeight', 'normal');
+    cb.Label.String = 'dB';
+    title(ax5, 'evoked', 'FontSize', 9, 'FontWeight', 'normal');
 
     ax6 = nexttile(tl, 8);
     if s.iid.itc
-        tf_image(ax6, te, res.f, res.itc, [0 1], s.cmap, logy);
-        mark_notch(ax6, nb);
+        tf_image(ax6, te, res.f, res.itc, [0 1], s, logy);
         xline(ax6, 0, 'w:');
         cb = colorbar(ax6);
         cb.Label.String = 'ITC';
-        title(ax6, 'inter-trial phase coherence (dotted: notch band, its ringing is spike-locked)', ...
-            'FontSize', 8, 'FontWeight', 'normal');
+        title(ax6, 'inter-trial phase coherence', 'FontSize', 9, 'FontWeight', 'normal');
     else
         axis(ax6, 'off');
     end
-    xlabel(ax6, 'ms re peak');
+    xlabel(ax6, 'time relative to peak (ms)');
     linkaxes([ax3 ax4 ax5 ax6], 'x');
 
-    src = res.src;
+    % general title: animal, session, kind only. Warnings are not drawn: they stay in
+    % res.warnings, the run log and the feature CSV.
     if zone
-        kind_txt = sprintf('IID zone, %.2f h', (res.off - res.on) / 3600);
+        kind_txt = 'IID zone';
     else
-        kind_txt = sprintf('IID interval, %.1f s', res.off - res.on);
+        kind_txt = 'IID interval';
     end
-    head = {sprintf('%s   %s   session %s   id %s   (%s)', res.subject, res.region, ...
-        res.session_key, res.id, kind_txt), ...
-        sprintf('%s -> %s (Natus) | %s (pipeline) | t_rel %.3f-%.3f s      signal %s, case %s, gain %g, notch %s', ...
-        res.on_natus, res.off_natus, res.on_pipeline, res.on, res.off, src.signal_source, blank(src.case_applied), ...
-        src.gain_applied, tf_text(src.notch_applied)), ...
-        sprintf('spikes: %d detected, %d used (excluded: nan %d, zone %d, edge %d, duplicate %d), %.1f / min; %d re-aligned at the +-%g ms limit', ...
-        f.n_detected, f.n_used, f.n_excl_nan, f.n_excl_zone, f.n_excl_edge, f.n_excl_duplicate, f.rate_per_min, ...
-        f.n_align_at_limit, s.iid.align_ms)};
-    title(tl, head, 'FontSize', 10, 'Interpreter', 'none');
-    if ~isempty(res.warnings)
-        tl.OuterPosition = [0 0.04 1 0.96];
-        annotation(fig, 'textbox', [0.005 0 0.99 0.037], 'String', ['WARNING  ' strjoin(res.warnings, '  |  ')], ...
-            'EdgeColor', 'none', 'FontSize', 7, 'Color', [0.7 0 0], 'Interpreter', 'none', ...
-            'VerticalAlignment', 'bottom');
-    end
+    title(tl, sprintf('%s   session %s   %s', res.subject, res.session_key, kind_txt), 'FontSize', 10, 'Interpreter', 'none');
 end
 
 %% ======================================================================
-function tf_image(ax, t, f, Z, cl, cmap, logy)
+function tf_image(ax, t, f, Z, cl, s, logy)
     h = pcolor(ax, t, f, Z);
     h.EdgeColor = 'none';
     set(ax, 'Color', [0.8 0.8 0.8], 'Layer', 'top');
-    colormap(ax, cmap);
+    colormap(ax, s.cmap);
     set(ax, 'CLim', cl);
     ylim(ax, [f(1) f(end)]);
+    ticks = [10 30 60 90 120];                    % default (also for a .mat saved before iid_freq_ticks)
+    if isfield(s, 'iid_freq_ticks') && ~isempty(s.iid_freq_ticks)
+        ticks = s.iid_freq_ticks;
+    end
     if logy
-        set(ax, 'YScale', 'log');
+        spec_set_freq_ticks(ax, s, [f(1) f(end)], 'log', ticks);
+    else
+        spec_set_freq_ticks(ax, s, [f(1) f(end)], 'linear', ticks);
     end
 end
 
@@ -190,47 +167,8 @@ function cl = map_clim(Z, s)
     end
 end
 
-function nb = notch_band_of(src)
-% notch band (lo hi rows) stored by the event, or rebuilt from the clean header
-    nb = zeros(0, 2);
-    if isfield(src, 'notch_band')
-        nb = src.notch_band;
-    elseif isfield(src, 'notch_applied') && src.notch_applied && isfield(src.header, 'notch_freqs')
-        f = sscanf(char(src.header.notch_freqs), '%f');
-        hw = 1;
-        if isfield(src.header, 'notch_halfwidth_hz')
-            hw = str2double(src.header.notch_halfwidth_hz);
-        end
-        nb = [f(:) - hw - 1, f(:) + hw + 1];
-    end
-end
-
-function mark_notch(ax, nb)
-% dotted lines at the notch band: power / phase there is shaped by the
-% pipeline's 50 Hz notch (its ringing is phase-locked to each event)
-    for k = 1:size(nb, 1)
-        yline(ax, nb(k, 1), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
-        yline(ax, nb(k, 2), 'w:', 'LineWidth', 0.8, 'Alpha', 0.8);
-    end
-end
-
 function xregion_safe(ax, a, b)
     yl = ylim(ax);
     patch(ax, [a b b a], [yl(1) yl(1) yl(2) yl(2)], [1 0.85 0.85], 'EdgeColor', 'none', 'FaceAlpha', 0.5);
 end
 
-function s = blank(v)
-    if isempty(v)
-        s = '-';
-    else
-        s = char(v);
-    end
-end
-
-function s = tf_text(b)
-    if b
-        s = 'yes';
-    else
-        s = 'no';
-    end
-end

@@ -120,14 +120,39 @@ function T = stack(parts)
     for i = 1:numel(parts)
         names = [names, setdiff(parts{i}.Properties.VariableNames, names, 'stable')]; %#ok<AGROW>
     end
+    % the type of each column, from the first part that has it
+    proto = containers.Map();
+    for i = 1:numel(parts)
+        for nm = parts{i}.Properties.VariableNames
+            if ~isKey(proto, nm{1}) && height(parts{i}) > 0
+                proto(nm{1}) = parts{i}.(nm{1})(1, :);
+            end
+        end
+    end
     for i = 1:numel(parts)
         miss = setdiff(names, parts{i}.Properties.VariableNames, 'stable');
         for m = miss
-            parts{i}.(m{1}) = repmat({''}, height(parts{i}), 1);
+            parts{i}.(m{1}) = repmat(missing_value(proto, m{1}), height(parts{i}), 1);
         end
         parts{i} = parts{i}(:, names);
     end
     T = vertcat(parts{:});
+end
+
+function v = missing_value(proto, name)
+% filler for a column an older output does not have: NaN / false / '' by type
+    v = {''};
+    if ~isKey(proto, name)
+        return;
+    end
+    p = proto(name);
+    if isnumeric(p)
+        v = NaN(1, size(p, 2));
+    elseif islogical(p)
+        v = false(1, size(p, 2));
+    elseif isstring(p)
+        v = "";
+    end
 end
 
 function s = safe(s)
